@@ -1,0 +1,55 @@
+# Local input data, generated output, and caches
+/storage/data/*
+!/storage/data/eplan_pdf/
+/storage/data/eplan_pdf/*
+!/storage/data/eplan_pdf/.gitkeep
+/storage/output/*
+!/storage/output/.gitkeep
+/storage/entity/
+/.eplan_cache/
+
+# Frontend dependencies and build output
+node_modules/
+/pdf_reader/dist/
+/pdf_reader/public/reader-data/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/

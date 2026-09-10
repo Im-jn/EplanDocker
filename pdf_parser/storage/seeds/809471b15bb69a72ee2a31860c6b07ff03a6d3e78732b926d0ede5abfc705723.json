@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "document": {
+    "sha256": "809471b15bb69a72ee2a31860c6b07ff03a6d3e78732b926d0ede5abfc705723",
+    "file_name": "example.pdf"
+  },
+  "entities": {
+    "12:1": {
+      "page_number": 12,
+      "entity_index": 1,
+      "entity_fingerprint": "a97f20e828c6ce505ed886abb9d82c937e9abc65298721fac0fd863cddac55f6",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 12, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "12:2": {
+      "page_number": 12,
+      "entity_index": 2,
+      "entity_fingerprint": "6a1c7221be9894ff0f21ca41ac85ec101f53bf60ec117372087171fc3167328c",
+      "classification": {"diagram_type": "others", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 12, entity 2."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "13:1": {
+      "page_number": 13,
+      "entity_index": 1,
+      "entity_fingerprint": "b66823ddec2a395caa4dc74f9bd031f9c421aac40938b439fdd969f33f714cc0",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 13, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "14:1": {
+      "page_number": 14,
+      "entity_index": 1,
+      "entity_fingerprint": "90bd4c54f23e0943aa4418b09b51a587ce99e4b773a36812845e9d77fb189a18",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 14, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "15:1": {
+      "page_number": 15,
+      "entity_index": 1,
+      "entity_fingerprint": "ffb9b0145742c2fe4368b8d9a1038481a6fd2f2638a4568afb30548f88380727",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 15, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "16:1": {
+      "page_number": 16,
+      "entity_index": 1,
+      "entity_fingerprint": "cfb956f7ea3a293335ee0297ab3bf7e8b065986cee5ad3c30150c7476a29624e",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 16, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:1": {
+      "page_number": 17,
+      "entity_index": 1,
+      "entity_fingerprint": "0b14ce8461ef5277efeef2f94717bfe3bfcb923afdb28fec01d7eac757fd79ec",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:2": {
+      "page_number": 17,
+      "entity_index": 2,
+      "entity_fingerprint": "f053f6562a914a1522d061359af7673ee4094c28f4c07267e4894712b3c1b4df",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 2."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:3": {
+      "page_number": 17,
+      "entity_index": 3,
+      "entity_fingerprint": "9c5296ccf3a9f1ab9a2c26468b8a27222ede18edc21f6171dea7d12467a8ab4d",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 3."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:4": {
+      "page_number": 17,
+      "entity_index": 4,
+      "entity_fingerprint": "e60d9449acd67c90eb283c87e0852e713b717416a2a486117f181f7f9497c190",
+      "classification": {"diagram_type": "others", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 4."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:5": {
+      "page_number": 17,
+      "entity_index": 5,
+      "entity_fingerprint": "edb4b38767d54c5144c30fb376b9db61bde4fd3feb94230ea1f0fbea661cb719",
+      "classification": {"diagram_type": "others", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 5."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:6": {
+      "page_number": 17,
+      "entity_index": 6,
+      "entity_fingerprint": "5bf452b6a8bde7aaad1aea1dda7647e9b94afc0be1f2efbdd1049fcb551c873d",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 6."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:7": {
+      "page_number": 17,
+      "entity_index": 7,
+      "entity_fingerprint": "a115af8d36a7387814d282a51221f6e33aeab31730c763e4e5fbd426c3db83d7",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 7."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:8": {
+      "page_number": 17,
+      "entity_index": 8,
+      "entity_fingerprint": "29005f873caf269e2f4f353f8a7d6abdc4533224900e81b25190e3c5c1bb68ab",
+      "classification": {"diagram_type": "others", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 8."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "17:9": {
+      "page_number": 17,
+      "entity_index": 9,
+      "entity_fingerprint": "47712e137ebfe29d58f0544d44ecfabfed95869cf5653d6de9868c506428d63c",
+      "classification": {"diagram_type": "others", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 17, entity 9."},
+      "source": "manual", "model": null, "updated_at": null
+    },
+    "18:1": {
+      "page_number": 18,
+      "entity_index": 1,
+      "entity_fingerprint": "012db5622197c6243afabe1c2a31d3df63b9851679b99f3bee391150640a31ec",
+      "classification": {"diagram_type": "electrical", "confidence": 1.0, "reasoning": "Manually reviewed example.pdf page 18, entity 1."},
+      "source": "manual", "model": null, "updated_at": null
+    }
+  }
+}
