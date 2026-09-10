@@ -60,7 +60,7 @@ print(result.diagram_type, result.confidence, result.reasoning)
 The PDF pipeline uses `PersistentDiagramClassifier` instead. It scopes cached
 results by the PDF SHA-256 and validates each page/entity entry with a geometry
 and text fingerprint. Cache misses call the configured LLM and are written
-atomically under `storage/entity`; cache hits do not render an
+atomically under `storage/cache/entity`; cache hits do not render an
 entity image or make a network request.
 
 All connection settings are passed explicitly through `LLMConfig` or CLI arguments;

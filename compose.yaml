@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      EPLAN_STORAGE_ROOT: /app/storage
+      EPLAN_INTERNAL_TOKEN: ${EPLAN_INTERNAL_TOKEN:-development-worker-token}
+      EPLAN_MAX_UPLOAD_BYTES: ${EPLAN_MAX_UPLOAD_BYTES:-1073741824}
+    volumes:
+      - ./storage:/app/storage
+    user: "${EPLAN_UID:-1000}:${EPLAN_GID:-1000}"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  pdf-parser-worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      EPLAN_STORAGE_ROOT: /app/storage
+      EPLAN_API_URL: http://api:8000
+      EPLAN_INTERNAL_TOKEN: ${EPLAN_INTERNAL_TOKEN:-development-worker-token}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - ./storage:/app/storage
+    user: "${EPLAN_UID:-1000}:${EPLAN_GID:-1000}"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

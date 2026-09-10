@@ -425,13 +425,12 @@ app.innerHTML = `
       <div class="panel">
         <div class="panel-title-row">
           <div>
-            <p class="eyebrow">PDF source reader</p>
+            <p class="eyebrow">Completed document</p>
             <h1 class="title">Eplan PDF Object Explorer</h1>
           </div>
         </div>
-        <p class="muted">
-          Choose any PDF from storage/data/eplan_pdf. The viewer renders the original PDF and overlays clickable vector and hyperlink regions.
-        </p>
+        <a class="button viewer-dashboard-link" href="/tasks">Task dashboard</a>
+        <p class="muted">Review fully processed PDFs and inspect their generated parsing results.</p>
       </div>
 
       <div class="panel">
@@ -694,10 +693,10 @@ app.innerHTML = `
           <div class="inspector-tabs" role="tablist">
             <button
               id="tab-symbols"
-              class="inspector-tab is-active"
+              class="inspector-tab"
               type="button"
               role="tab"
-              aria-selected="true"
+              aria-selected="false"
               data-tab="symbols"
             >
               Symbols
@@ -714,10 +713,10 @@ app.innerHTML = `
             </button>
             <button
               id="tab-info-trace"
-              class="inspector-tab"
+              class="inspector-tab is-active"
               type="button"
               role="tab"
-              aria-selected="false"
+              aria-selected="true"
               data-tab="info-trace"
             >
               Info Trace
@@ -734,7 +733,7 @@ app.innerHTML = `
             </button>
           </div>
 
-          <div id="tab-panel-symbols" class="inspector-tab-panel" role="tabpanel">
+          <div id="tab-panel-symbols" class="inspector-tab-panel" role="tabpanel" hidden>
             <p class="eyebrow">Symbol extraction</p>
             <h2 class="section-title">Symbol Overview</h2>
             <label class="field-label" for="symbol-pages-input">Symbol overview pages</label>
@@ -801,7 +800,7 @@ app.innerHTML = `
             <div id="extract-info-result" class="extract-info-result"></div>
           </div>
 
-          <div id="tab-panel-info-trace" class="inspector-tab-panel" role="tabpanel" hidden>
+          <div id="tab-panel-info-trace" class="inspector-tab-panel" role="tabpanel">
             <p class="eyebrow">Connectivity tracing</p>
             <h2 class="section-title">Info Trace</h2>
             <div class="info-trace-controls">
@@ -1560,7 +1559,7 @@ function pageKey(documentId: string, pageNumber: number): string {
 }
 
 async function loadManifest(): Promise<Manifest> {
-  const response = await fetch('/reader-data/manifest.json')
+  const response = await fetch('/api/v1/documents/manifest')
   if (!response.ok) {
     throw new Error(`Failed to load manifest: ${response.status}`)
   }
@@ -7707,7 +7706,10 @@ async function bootstrap(): Promise<void> {
       return
     }
     populateDocumentSelect(manifest.documents)
-    await selectDocument(manifest.documents[0].id)
+    const requestedDocumentId = window.location.pathname.match(/^\/viewer\/([^/]+)/)?.[1]
+    const initialDocument = manifest.documents.find((document) => document.id === requestedDocumentId)
+      ?? manifest.documents[0]
+    await selectDocument(initialDocument.id)
     updatePagerButtons()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

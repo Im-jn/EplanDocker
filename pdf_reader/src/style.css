@@ -87,6 +87,21 @@ body {
   background: var(--bg);
 }
 
+.viewer-dashboard-link {
+  display: inline-flex;
+  width: fit-content;
+  margin: 12px 0 4px;
+  text-decoration: none;
+}
+
+/* Completed documents are read-only: interactive extraction moved to the API job flow. */
+#tab-symbols,
+#tab-extract-info,
+#tab-panel-symbols,
+#tab-panel-extract-info {
+  display: none !important;
+}
+
 button,
 select,
 input,

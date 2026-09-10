@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+**/__pycache__
+**/*.pyc
+pdf_reader/node_modules
+pdf_reader/dist
+pdf_reader/public/reader-data
+storage/data
+storage/output
+storage/state
+storage/tmp
+*.log

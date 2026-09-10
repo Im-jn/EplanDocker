@@ -26,7 +26,7 @@ class EntityStore:
     def __init__(
         self,
         pdf_path: str | Path,
-        storage_directory: str | Path = "./storage/entity",
+        storage_directory: str | Path = "./storage/cache/entity",
     ):
         self.pdf_path = resolve_repo_relative(str(pdf_path))
         if not self.pdf_path.is_file():

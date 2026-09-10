@@ -737,11 +737,18 @@ def build_document_data(
     pdf_path: Path,
     data_root: Path,
     progress_callback: ProgressCallback | None = None,
+    *,
+    document_id: str | None = None,
+    title: str | None = None,
+    copy_pdf: bool = True,
+    api_base: str = "/reader-data",
 ) -> dict[str, Any]:
-    doc_slug = _safe_slug(pdf_path.stem)
-    pdf_target_path = data_root / "pdfs" / f"{doc_slug}.pdf"
-    pdf_target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(pdf_path, pdf_target_path)
+    doc_slug = document_id or _safe_slug(pdf_path.stem)
+    pdf_target_path = pdf_path
+    if copy_pdf:
+        pdf_target_path = data_root / "pdfs" / f"{doc_slug}.pdf"
+        pdf_target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf_path, pdf_target_path)
 
     doc = fitz.open(pdf_path)
     try:
@@ -759,7 +766,11 @@ def build_document_data(
                     "page_size": page_data["page_size"],
                     "item_counts": page_data["item_counts"],
                     "warnings": page_data["warnings"],
-                    "data_url": f"/reader-data/documents/{doc_slug}/pages/page-{page_number:04d}.json",
+                    "data_url": (
+                        f"{api_base}/documents/{doc_slug}/pages/page-{page_number:04d}.json"
+                        if copy_pdf
+                        else f"{api_base}/documents/{doc_slug}/pages/{page_number}"
+                    ),
                 }
             )
             write_json(pages_root / f"page-{page_number:04d}.json", page_data)
@@ -769,8 +780,12 @@ def build_document_data(
         header = read_pdf_header(pdf_target_path)
         document_payload = {
             "id": doc_slug,
-            "title": pdf_path.name,
-            "pdf_url": f"/reader-data/pdfs/{doc_slug}.pdf",
+            "title": title or pdf_path.name,
+            "pdf_url": (
+                f"{api_base}/pdfs/{doc_slug}.pdf"
+                if copy_pdf
+                else f"{api_base}/documents/{doc_slug}/file"
+            ),
             "page_count": len(page_entries),
             "pages": page_entries,
             "resolved_object_count": max(doc.xref_length() - 1, 0),
@@ -796,7 +811,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="pdf_reader/public/reader-data",
+        default="storage/output/reader_data",
         help="Directory where generated reader data will be written.",
     )
     return parser.parse_args()

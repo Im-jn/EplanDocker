@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter
@@ -117,6 +117,7 @@ def _json_value(value: Any) -> Any:
 def parse_diagram_pdf(
     pdf_file_path: str | Path,
     *,
+    target_pages: Iterable[int] | None = None,
     llm_config: LLMConfig | None = None,
     progress_callback: ProgressCallback | None = None,
     entity_image_directory: str | Path = "./storage/output/images/entities",
@@ -143,6 +144,21 @@ def parse_diagram_pdf(
     diagram_page_numbers: list[int] = []
 
     with PdfPageManager(pdf_path) as pages:
+        selected_pages = (
+            {int(page_number) for page_number in target_pages}
+            if target_pages is not None
+            else None
+        )
+        if selected_pages is not None:
+            invalid_pages = sorted(
+                page_number
+                for page_number in selected_pages
+                if page_number < 1 or page_number > pages.page_count
+            )
+            if invalid_pages:
+                raise ValueError(
+                    f"Target pages are outside 1..{pages.page_count}: {invalid_pages}"
+                )
         report(f"Opened {pdf_path.name} ({pages.page_count} pages)")
         report("Detecting page content region from page 1")
         page_data = pages.goto(1)
@@ -156,6 +172,12 @@ def parse_diagram_pdf(
             raise ValueError("No information region found")
 
         pdf_info: dict[str, Any] = {
+            "schema_version": "1.0",
+            "document": {
+                "filename": pdf_path.name,
+                "page_count": pages.page_count,
+                "target_pages": sorted(selected_pages) if selected_pages is not None else None,
+            },
             "pages": {},
             "symbol_overview": {},
             "crosspage_relations": {
@@ -208,7 +230,9 @@ def parse_diagram_pdf(
                 symbols = extract_symbols(content["vectors"], content["text"])
                 symbol_results.append(symbols)
                 page_record["diagram"] = symbols
-            elif page_type in DIAGRAM_TYPES:
+            elif page_type in DIAGRAM_TYPES and (
+                selected_pages is None or page_num in selected_pages
+            ):
                 diagram_page_numbers.append(page_num)
             page_numbers.set_postfix(
                 type=page_type or "unsupported",

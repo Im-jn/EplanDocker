@@ -64,7 +64,7 @@ class LLMConfig:
     temperature: float = 0.0
     reasoning_effort: str | None = "none"
     max_retries: int = 1
-    storage_directory: str = "./storage/entity"
+    storage_directory: str = "./storage/cache/entity"
 
     @classmethod
     def groq(cls, *, api_key: str, **overrides: Any) -> "LLMConfig":

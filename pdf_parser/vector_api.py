@@ -52,7 +52,7 @@ SYMBOL_CACHE_LIMIT = PARSER_CONFIG.api_cache.symbol_limit
 SYMBOL_MATCH_OVERLAP_RATIO = PARSER_CONFIG.vector_matcher.symbol_overlap_ratio
 DEFAULT_LLM_CONFIG = LLMConfig()
 PERSISTENCE_VERSION = 14
-PERSISTENCE_ROOT = resolve_repo_relative("./.eplan_cache/frontend")
+PERSISTENCE_ROOT = resolve_repo_relative("./storage/cache/frontend")
 PARSING_RESULT_ROOT = resolve_repo_relative("./storage/output/pdf_parsing_result")
 
 _page_cache: OrderedDict[tuple[str, int, int, int], dict[str, Any]] = OrderedDict()
@@ -125,11 +125,21 @@ def _load_document_result(
     *,
     result_root: Path = PARSING_RESULT_ROOT,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Load and cache ``<PDF stem>.json`` for document-level projections."""
-    result_path = result_root / f"{pdf_path.stem}.json"
-    try:
-        stat = result_path.stat()
-    except OSError:
+    """Load a document result from the API layout or the legacy flat layout."""
+    candidates = (
+        result_root / pdf_path.parent.name / "result.json",
+        result_root / f"{pdf_path.stem}.json",
+    )
+    result_path: Path | None = None
+    stat = None
+    for candidate in candidates:
+        try:
+            stat = candidate.stat()
+            result_path = candidate
+            break
+        except OSError:
+            continue
+    if result_path is None or stat is None:
         return None, None
 
     cache_key = (str(result_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))

@@ -5,7 +5,9 @@
 !/storage/data/eplan_pdf/.gitkeep
 /storage/output/*
 !/storage/output/.gitkeep
-/storage/entity/
+/storage/cache/
+/storage/state/
+/storage/tmp/
 /.eplan_cache/
 
 # Frontend dependencies and build output
