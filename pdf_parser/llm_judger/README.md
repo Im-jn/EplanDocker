@@ -1,67 +1,48 @@
 # Diagram LLM Judger
 
-Classifies one image into `electrical`, `mechanical`, `table`, or `others` with
-an OpenAI-compatible multimodal model. The same client works with local vLLM
-and hosted APIs.
+This package classifies an image as `electrical`, `mechanical`, `table`, or
+`others` with any multimodal model that exposes an OpenAI-compatible
+`/chat/completions` endpoint. The same HTTP client is used for hosted APIs and
+local inference servers; no vendor SDK is required.
 
-The defaults are Groq's `https://api.groq.com/openai/v1` endpoint and the
-multimodal `qwen/qwen3.6-27b` model. API keys are always passed explicitly and
-are never stored by this package.
+Configure it with environment variables:
 
-Hosted API requests are sent with Groq's official Python SDK. Local provider
-requests are sent directly to an OpenAI-compatible `/chat/completions`
-endpoint. Install dependencies before running the classifier:
-
-```powershell
-pip install -r requirements.txt
+```dotenv
+LLM_PROVIDER=api
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_API_KEY=your-api-key
+LLM_MODEL=your-multimodal-model
+LLM_TIMEOUT_SECONDS=30
+LLM_MAX_TOKENS=512
 ```
 
-Local vLLM example:
+For an unauthenticated local server, set `LLM_PROVIDER=local`, leave
+`LLM_API_KEY` empty, and point `LLM_BASE_URL` at the local endpoint. From a
+Docker Desktop container, a server on the host is normally reached through
+`http://host.docker.internal:<port>/v1` rather than `localhost`.
 
-```powershell
-python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-VL-7B-Instruct
-
-python -m pdf_parser.llm_judger .\page.png `
-    --provider local `
-    --model "Qwen/Qwen2.5-VL-7B-Instruct" `
-    --base-url "http://localhost:8000/v1"
-```
-
-Remote API example:
+Command-line example:
 
 ```powershell
 python -m pdf_parser.llm_judger .\page.png `
     --provider api `
-    --api-key "your-key"
+    --model "your-multimodal-model" `
+    --base-url "https://your-provider.example/v1" `
+    --api-key "your-api-key"
 ```
 
-PDF pipeline local example:
-
-```powershell
-python -m pdf_parser.main `
-    --pdf-file-path .\storage\data\eplan_pdf\example.pdf `
-    --llm-provider local `
-    --llm-model "Qwen/Qwen2.5-VL-7B-Instruct" `
-    --llm-base-url "http://localhost:8000/v1"
-```
-
-Python usage:
+Python example:
 
 ```python
 from pdf_parser.llm_judger import DiagramClassifier, LLMConfig
 
-classifier = DiagramClassifier(
-    LLMConfig.groq(api_key="your-key")
-)
+classifier = DiagramClassifier(LLMConfig.from_env())
 result = classifier.classify("page.png")
 print(result.diagram_type, result.confidence, result.reasoning)
 ```
 
-The PDF pipeline uses `PersistentDiagramClassifier` instead. It scopes cached
-results by the PDF SHA-256 and validates each page/entity entry with a geometry
-and text fingerprint. Cache misses call the configured LLM and are written
-atomically under `storage/cache/entity`; cache hits do not render an
-entity image or make a network request.
-
-All connection settings are passed explicitly through `LLMConfig` or CLI arguments;
-the classifier does not read environment variables.
+The PDF pipeline uses `PersistentDiagramClassifier`. It scopes cached results
+by PDF SHA-256 and validates every page/entity entry with a geometry and text
+fingerprint. Cache misses call the configured LLM and are written atomically
+under `storage/cache/entity`; cache hits do not render an entity image or make
+a network request.

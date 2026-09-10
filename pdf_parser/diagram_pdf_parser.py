@@ -44,7 +44,7 @@ from pdf_parser.pages_manager.split_page import SplitPageDetector
 from pdf_parser.tools.text_matcher import TextMatcher
 from pdf_parser.tools.endpoints_tools import EndpointTools
 from pdf_parser.tools.vector_entity import VectorDisjointSet
-from pdf_parser.tools.vector_visualize import render_vector_text_png
+from pdf_parser.tools.vector_visualize import render_vector_text_png_bytes
 from pdf_parser.utils import resolve_repo_relative
 
 
@@ -120,8 +120,6 @@ def parse_diagram_pdf(
     target_pages: Iterable[int] | None = None,
     llm_config: LLMConfig | None = None,
     progress_callback: ProgressCallback | None = None,
-    entity_image_directory: str | Path = "./storage/output/images/entities",
-    remaining_image_directory: str | Path = "./storage/output/images",
     checkpoint_file: str | Path | None = None,
     resume: bool = True,
     show_page_progress: bool = False,
@@ -138,8 +136,6 @@ def parse_diagram_pdf(
     checkpoint_path = (
         resolve_repo_relative(str(checkpoint_file)) if checkpoint_file is not None else None
     )
-    entity_image_directory = resolve_repo_relative(str(entity_image_directory))
-    remaining_image_directory = resolve_repo_relative(str(remaining_image_directory))
     symbol_results: list[dict[str, Any]] = []
     diagram_page_numbers: list[int] = []
 
@@ -303,14 +299,8 @@ def parse_diagram_pdf(
                     )
                     continue
 
-                def render_entity_image() -> Path:
-                    entity_image = render_vector_text_png(
-                        entity_vectors,
-                        entity_texts,
-                        output_dir=entity_image_directory,
-                        filename=f"page_{page_num}_entity_{entity_index}.png",
-                    )
-                    return entity_image
+                def render_entity_image() -> bytes:
+                    return render_vector_text_png_bytes(entity_vectors, entity_texts)
 
                 decision = diagram_classifier.classify_entity(
                     page_number=page_num,

@@ -11,6 +11,11 @@ import fitz
 
 
 ROUND_DIGITS = 3
+# A browser cannot usefully create hundreds of thousands of hit targets for one
+# page.  Keep precise vector hit testing for ordinary pages, but let PDF.js
+# render dense pages directly instead of serializing their drawing programs.
+MAX_VECTOR_HIT_TARGETS = 2_000
+READER_SCHEMA_VERSION = 5
 
 
 def round_float(value: float, digits: int = ROUND_DIGITS) -> float:
@@ -400,10 +405,18 @@ def extract_vector_paths_pymupdf(
     page_number: int,
     height: float,
     object_details: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], int]:
     warnings: list[str] = []
     items: list[dict[str, Any]] = []
     drawings = page.get_drawings(extended=False)
+    drawing_count = len(drawings)
+    if drawing_count > MAX_VECTOR_HIT_TARGETS:
+        warnings.append(
+            f"Vector hit testing was omitted for this dense page ({drawing_count} paths; "
+            f"limit {MAX_VECTOR_HIT_TARGETS}). The PDF remains fully visible."
+        )
+        return items, warnings, drawing_count
+
     page_ref = ensure_xref_detail(
         doc,
         object_details,
@@ -432,7 +445,6 @@ def extract_vector_paths_pymupdf(
             "page_number": page_number,
             "paint_operator": paint_op,
             "bbox": bbox,
-            "commands": commands,
             "line_width": round_float(width),
             "effective_line_width": round_float(effective_w),
             "source": {
@@ -454,7 +466,7 @@ def extract_vector_paths_pymupdf(
         }
         items.append(item)
 
-    return items, warnings
+    return items, warnings, drawing_count
 
 
 def extract_text_items_pymupdf(
@@ -676,7 +688,9 @@ def build_page_data(doc: fitz.Document, page: fitz.Page, page_number: int) -> di
     height = page_height_pt(page)
     object_details: dict[str, dict[str, Any]] = {}
 
-    vector_items, vector_warnings = extract_vector_paths_pymupdf(doc, page, page_number, height, object_details)
+    vector_items, vector_warnings, vector_count = extract_vector_paths_pymupdf(
+        doc, page, page_number, height, object_details
+    )
     text_items, text_warnings = extract_text_items_pymupdf(doc, page, page_number, height, object_details)
     image_items, image_warnings = extract_image_items_pymupdf(doc, page, page_number, height, object_details)
     link_items = extract_link_items_pymupdf(doc, page, page_number, height, object_details)
@@ -697,6 +711,12 @@ def build_page_data(doc: fitz.Document, page: fitz.Page, page_number: int) -> di
         },
         "content_streams": content_labels,
         "item_counts": {
+            "vector_path": vector_count,
+            "text": len(text_items),
+            "image": len(image_items),
+            "link": len(link_items),
+        },
+        "indexed_counts": {
             "vector_path": len(vector_items),
             "text": len(text_items),
             "image": len(image_items),
@@ -710,7 +730,10 @@ def build_page_data(doc: fitz.Document, page: fitz.Page, page_number: int) -> di
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def read_pdf_header(pdf_path: Path) -> str:
@@ -757,14 +780,15 @@ def build_document_data(
         page_entries: list[dict[str, Any]] = []
 
         for index in range(doc.page_count):
-            page = doc[index]
             page_number = index + 1
+            page = doc[index]
             page_data = build_page_data(doc, page, page_number)
             page_entries.append(
                 {
                     "page_number": page_data["page_number"],
                     "page_size": page_data["page_size"],
                     "item_counts": page_data["item_counts"],
+                    "indexed_counts": page_data["indexed_counts"],
                     "warnings": page_data["warnings"],
                     "data_url": (
                         f"{api_base}/documents/{doc_slug}/pages/page-{page_number:04d}.json"
@@ -779,6 +803,7 @@ def build_document_data(
 
         header = read_pdf_header(pdf_target_path)
         document_payload = {
+            "reader_schema_version": READER_SCHEMA_VERSION,
             "id": doc_slug,
             "title": title or pdf_path.name,
             "pdf_url": (

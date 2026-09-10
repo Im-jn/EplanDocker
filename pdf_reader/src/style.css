@@ -87,19 +87,84 @@ body {
   background: var(--bg);
 }
 
-.viewer-dashboard-link {
+.viewer-back-link {
   display: inline-flex;
-  width: fit-content;
-  margin: 12px 0 4px;
+  align-items: center;
+  align-self: flex-start;
+  width: auto;
+  margin: 2px 8px 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
+  font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
 }
 
-/* Completed documents are read-only: interactive extraction moved to the API job flow. */
-#tab-symbols,
-#tab-extract-info,
-#tab-panel-symbols,
-#tab-panel-extract-info {
-  display: none !important;
+.viewer-back-link:hover {
+  border-color: var(--input-border);
+  background: var(--elevated);
+}
+
+.reader-preparation {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 320px;
+  padding: 32px;
+  background: rgba(232, 233, 230, 0.94);
+  backdrop-filter: blur(3px);
+}
+
+.reader-preparation[hidden] {
+  display: none;
+}
+
+.reader-preparation-card {
+  width: min(520px, 90%);
+  padding: 30px 32px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 18px 50px rgba(30, 38, 34, 0.14);
+  text-align: center;
+}
+
+.reader-preparation-card h2 {
+  margin: 4px 0 8px;
+  font-size: 1.35rem;
+}
+
+.reader-preparation-card p {
+  margin: 0 0 20px;
+}
+
+.reader-preparation-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 12px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-preparation-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  border: 1px solid var(--panel-border);
+}
+
+.reader-preparation-track > div {
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
 }
 
 button,
@@ -1545,6 +1610,7 @@ pre {
 }
 
 .viewer-scroll {
+  position: relative;
   overflow: auto;
   padding: 20px;
   min-height: 0;

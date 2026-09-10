@@ -8,7 +8,7 @@ from pdf_parser.llm_judger import LLMConfig
 from pdf_parser.utils import resolve_repo_relative
 
 
-DEFAULT_LLM_CONFIG = LLMConfig()
+DEFAULT_LLM_CONFIG = LLMConfig.from_env()
 DEFAULT_LOCAL_LLM_CONFIG = LLMConfig.local()
 
 
@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--llm-base-url",
         help=(
-            "OpenAI-compatible API base URL. Defaults to Groq for api mode and "
+            "OpenAI-compatible API base URL. Uses LLM_BASE_URL for api mode and "
             "http://localhost:8000/v1 for local mode."
         ),
     )

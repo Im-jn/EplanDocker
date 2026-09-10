@@ -11,14 +11,20 @@ from urllib.request import Request, urlopen
 
 from eplan_runtime import INTERNAL_TOKEN, PDF_ROOT, RESULT_ROOT
 from pdf_parser.diagram_pdf_parser import parse_diagram_pdf, save_pdf_info
+from pdf_parser.llm_judger import LLMConfig
 
 
 API_URL = os.getenv("EPLAN_API_URL", "http://api:8000").rstrip("/")
 POLL_SECONDS = float(os.getenv("EPLAN_WORKER_POLL_SECONDS", "2"))
 PAGE_PROGRESS_RE = re.compile(r"Diagram page (\d+)/(\d+)")
+LLM_CONFIG = LLMConfig.from_env()
 
 
 class JobCancelled(RuntimeError):
+    pass
+
+
+class JobPaused(RuntimeError):
     pass
 
 
@@ -68,14 +74,17 @@ def process_job(job: dict[str, Any]) -> None:
             f"/internal/v1/worker/jobs/{job_id}/progress",
             {"progress": progress, "stage": stage, "message": message},
         )
-        if response.get("cancel_requested"):
+        if response.get("delete_requested") or response.get("cancel_requested"):
             raise JobCancelled("Cancellation requested")
+        if response.get("pause_requested"):
+            raise JobPaused("Pause requested")
 
     try:
         pages = job.get("pages") or None
         pdf_info = parse_diagram_pdf(
             pdf_path,
             target_pages=pages,
+            llm_config=LLM_CONFIG,
             progress_callback=report,
             checkpoint_file=checkpoint_path,
             resume=True,
@@ -87,6 +96,12 @@ def process_job(job: dict[str, Any]) -> None:
             "POST",
             f"/internal/v1/worker/jobs/{job_id}/complete",
             {"result_path": str(saved_path)},
+        )
+    except JobPaused as exc:
+        api_request(
+            "POST",
+            f"/internal/v1/worker/jobs/{job_id}/fail",
+            {"paused": True, "error": str(exc)},
         )
     except JobCancelled as exc:
         api_request(

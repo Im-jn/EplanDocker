@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,20 +57,15 @@ class LLMConfig:
     """Classification behavior and connection settings for the diagram judge."""
 
     provider: LLMProvider = "api"
-    model: str = "qwen/qwen3.6-27b"
-    base_url: str = "https://api.groq.com/openai/v1"
-    api_key: str | None = "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"
+    model: str = ""
+    base_url: str = ""
+    api_key: str | None = None
     timeout_seconds: float = 30.0
     max_tokens: int = 512
     temperature: float = 0.0
-    reasoning_effort: str | None = "none"
+    reasoning_effort: str | None = None
     max_retries: int = 1
     storage_directory: str = "./storage/cache/entity"
-
-    @classmethod
-    def groq(cls, *, api_key: str, **overrides: Any) -> "LLMConfig":
-        """Create the default Groq vision configuration with an explicit key."""
-        return cls(provider="api", api_key=api_key, **overrides)
 
     @classmethod
     def local(cls, **overrides: Any) -> "LLMConfig":
@@ -84,9 +80,28 @@ class LLMConfig:
         defaults.update(overrides)
         return cls(**defaults)
 
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "LLMConfig":
+        """Load a vendor-neutral OpenAI-compatible endpoint configuration."""
+        values: dict[str, Any] = {
+            "provider": os.getenv("LLM_PROVIDER", "api"),
+            "model": os.getenv("LLM_MODEL", ""),
+            "base_url": os.getenv("LLM_BASE_URL", ""),
+            "api_key": os.getenv("LLM_API_KEY") or None,
+            "timeout_seconds": float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+            "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "512")),
+            "reasoning_effort": os.getenv("LLM_REASONING_EFFORT") or None,
+        }
+        values.update(overrides)
+        return cls(**values)
+
     @property
     def chat_completions_url(self) -> str:
         url = self.base_url.rstrip("/")
+        if not url:
+            raise DiagramClassificationError(
+                "No LLM endpoint is configured. Set LLM_BASE_URL and LLM_MODEL."
+            )
         if url.endswith("/chat/completions"):
             return url
         return f"{url}/chat/completions"
@@ -114,17 +129,14 @@ class DiagramClassifier:
 
     def __init__(self, config: LLMConfig, *, transport: Transport | None = None):
         self.config = config
-        self._transport = transport or (
-            _post_with_openai_compatible_http
-            if config.provider == "local"
-            else _post_with_groq
-        )
+        self._transport = transport or _post_with_openai_compatible_http
 
     def classify(self, image: str | Path | bytes, *, mime_type: str | None = None) -> DiagramClassification:
+        if not self.config.model:
+            raise DiagramClassificationError(
+                "No multimodal model is configured. Set LLM_MODEL."
+            )
         image_url = _image_data_url(image, mime_type=mime_type)
-        token_limit_key = (
-            "max_tokens" if self.config.provider == "local" else "max_completion_tokens"
-        )
         payload = {
             "model": self.config.model,
             "messages": [
@@ -144,8 +156,7 @@ class DiagramClassifier:
                 },
             ],
             "temperature": self.config.temperature,
-            token_limit_key: self.config.max_tokens,
-            "response_format": {"type": "json_object"},
+            "max_tokens": self.config.max_tokens,
         }
         if self.config.reasoning_effort is not None:
             payload["reasoning_effort"] = self.config.reasoning_effort
@@ -153,8 +164,8 @@ class DiagramClassifier:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            # urllib's default Python-urllib signature can be rejected by
-            # Cloudflare Browser Integrity Check before it reaches Groq.
+            # Some hosted gateways reject urllib's default signature before
+            # the request reaches their OpenAI-compatible endpoint.
             "User-Agent": "EplanMaster-LLM-Judger/1.0",
         }
         if self.config.api_key:
@@ -184,49 +195,13 @@ def _image_data_url(image: str | Path | bytes, *, mime_type: str | None) -> str:
     return f"data:{detected_type};base64,{encoded}"
 
 
-def _post_with_groq(
-    url: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    """Call chat completions through Groq's official Python SDK."""
-    try:
-        from groq import Groq
-    except ImportError as exc:
-        raise DiagramClassificationError(
-            "The groq package is required; install project requirements first"
-        ) from exc
-
-    authorization = headers.get("Authorization", "")
-    api_key = authorization.removeprefix("Bearer ").strip() or "not-required"
-    base_url = url.removesuffix("/chat/completions").rstrip("/")
-    # The Groq SDK appends /openai/v1/chat/completions itself. Its base_url is
-    # therefore the API host, unlike an OpenAI client base URL.
-    if base_url.endswith("/openai/v1"):
-        base_url = base_url.removesuffix("/openai/v1")
-    request_payload = dict(payload)
-    max_retries = int(request_payload.pop("_max_retries", 2))
-    client = Groq(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout_seconds,
-        max_retries=max_retries,
-    )
-    try:
-        response = client.chat.completions.create(**request_payload)
-    except Exception as exc:
-        raise DiagramClassificationError(f"LLM API request failed: {exc}") from exc
-    return response.model_dump(mode="json")
-
-
 def _post_with_openai_compatible_http(
     url: str,
     payload: dict[str, Any],
     headers: dict[str, str],
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    """Call a local OpenAI-compatible chat completions endpoint with stdlib HTTP."""
+    """Call any OpenAI-compatible chat completions endpoint with stdlib HTTP."""
     request_payload = dict(payload)
     request_payload.pop("_max_retries", None)
     data = json.dumps(request_payload).encode("utf-8")
@@ -237,14 +212,14 @@ def _post_with_openai_compatible_http(
     except HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise DiagramClassificationError(
-            f"Local LLM request failed with HTTP {exc.code}: {details}"
+            f"LLM request failed with HTTP {exc.code}: {details}"
         ) from exc
     except URLError as exc:
-        raise DiagramClassificationError(f"Local LLM request failed: {exc}") from exc
+        raise DiagramClassificationError(f"LLM request failed: {exc}") from exc
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
-        raise DiagramClassificationError("Local LLM response is not valid JSON") from exc
+        raise DiagramClassificationError("LLM response is not valid JSON") from exc
 
 
 def _parse_response(response: dict[str, Any]) -> DiagramClassification:

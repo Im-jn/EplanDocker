@@ -25,12 +25,12 @@ worker 领取任务并持续上报进度
     ↓
 parsing result 原子写入 storage（此时外部调用方即可下载）
     ↓
-API 后台生成 reader-data
+用户首次打开 PDF reader，前端请求 API 生成 reader-data
     ↓
 文档进入 ready 状态并出现在前端阅读器
 ```
 
-解析状态和前端发布状态相互独立。外部调用方不需要等待 reader-data 生成完成。
+解析状态和前端发布状态相互独立。reader-data 采用首次打开时懒生成，并在页面上显示页级进度；外部调用方不需要等待它完成即可下载 parsing result。
 
 ## 项目结构
 
@@ -77,7 +77,9 @@ storage/
 Copy-Item .env.example .env
 ```
 
-至少应将 `.env` 中的 `EPLAN_INTERNAL_TOKEN` 替换为随机长字符串。使用托管 LLM 分类时还需要设置 `GROQ_API_KEY`。
+API 与 worker 使用的内部 token 会在首次启动时自动生成到 `storage/state/.internal-worker-token`，交付和部署时不需要手工填写。该文件不会通过公开 API 暴露。
+
+提交新的解析任务前，还需要在 `.env` 中配置一个支持图像输入的 OpenAI-compatible 模型；既可以使用云端模型 API，也可以使用本地部署的模型服务。
 
 启动三个服务：
 
@@ -99,6 +101,30 @@ docker compose down
 ```
 
 `storage` 是宿主机目录，执行 `docker compose down` 不会删除其中的 PDF、结果、任务记录或缓存。
+
+## 大模型配置
+
+解析器通过标准的 `/chat/completions` 接口调用多模态模型，不绑定特定模型厂商。
+
+使用云端模型 API：
+
+```dotenv
+LLM_PROVIDER=api
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_API_KEY=your-api-key
+LLM_MODEL=your-multimodal-model
+```
+
+使用运行在宿主机上的本地 OpenAI-compatible 服务（例如 vLLM、Ollama 的兼容接口或其他推理服务器）：
+
+```dotenv
+LLM_PROVIDER=local
+LLM_BASE_URL=http://host.docker.internal:8000/v1
+LLM_API_KEY=
+LLM_MODEL=your-local-multimodal-model
+```
+
+如果模型服务也是 Compose 中的容器，可将 `host.docker.internal` 换成该服务名。所选模型必须支持消息中的 `image_url` 图像输入，并能够返回 JSON 文本。
 
 ## 直接调用 API
 
@@ -142,11 +168,16 @@ curl.exe -OJ http://localhost:8000/api/v1/parsing-jobs/JOB_ID/result/download
 
 只要任务状态成为 `succeeded`，parsing result 就可以下载；`reader_status` 可能仍为 `pending` 或 `building`。
 
-取消尚未完成的任务：
+暂停、继续、取消或永久删除任务：
 
 ```powershell
+curl.exe -X POST http://localhost:8000/api/v1/parsing-jobs/JOB_ID/pause
+curl.exe -X POST http://localhost:8000/api/v1/parsing-jobs/JOB_ID/resume
+curl.exe -X POST http://localhost:8000/api/v1/parsing-jobs/JOB_ID/cancel
 curl.exe -X DELETE http://localhost:8000/api/v1/parsing-jobs/JOB_ID
 ```
+
+`DELETE` 会删除该文档的所有 Queue 记录、缓存 PDF、parsing result 和 Reader data；运行中的任务会先安全停止，再完成删除。
 
 ### 提交批量任务
 
@@ -170,9 +201,16 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/parsing-jobs` | 上传单个 PDF 并创建任务 |
 | `POST` | `/api/v1/parsing-batches` | 上传多个 PDF 并创建批次 |
 | `GET` | `/api/v1/parsing-jobs/{job_id}` | 查询任务和进度 |
-| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | 请求取消任务 |
+| `POST` | `/api/v1/parsing-jobs/{job_id}/pause` | 暂停任务并保留 checkpoint |
+| `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | 继续暂停的任务 |
+| `POST` | `/api/v1/parsing-jobs/{job_id}/cancel` | 请求取消任务 |
+| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | 永久删除任务及关联文档数据 |
 | `GET` | `/api/v1/parsing-jobs/{job_id}/result` | 获取规范 parsing result |
-| `GET` | `/api/v1/documents` | 列出已完成且可阅读的文档 |
+| `GET` | `/api/v1/cached-pdfs` | 列出 storage 中缓存的 PDF |
+| `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | 重新处理缓存 PDF |
+| `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 及关联数据 |
+| `GET` | `/api/v1/documents` | 列出已解析文档及其 reader 状态 |
+| `POST` | `/api/v1/documents/{document_id}/prepare` | 按需启动 reader-data 预处理 |
 | `POST` | `/api/v1/queries` | 查询已完成文档 |
 
 `/internal/v1/worker/*` 只供 Compose 内部网络中的 worker 使用，不应通过反向代理暴露。
@@ -187,7 +225,7 @@ python -m scripts.import_completed_document `
   path\to\drawing.json
 ```
 
-脚本按 PDF SHA-256 生成稳定的 `document_id`，把文件移动到规范 storage 目录，并将任务登记为 `succeeded / reader pending`。API 启动后会补建 reader-data。
+脚本按 PDF SHA-256 生成稳定的 `document_id`，把文件移动到规范 storage 目录，并将任务登记为 `succeeded / reader pending`。用户首次打开该文档时会按需生成 reader-data。
 
 当前已有的 `TE2_Sealer.pdf` 及其 parsing result 已按此方式登记，无需再次提交解析任务。
 
@@ -227,11 +265,15 @@ Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`。可通过 `EPLAN_API_URL`
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `EPLAN_STORAGE_ROOT` | 项目下的 `storage` | 持久化根目录 |
-| `EPLAN_INTERNAL_TOKEN` | 开发用固定值 | API 与 worker 的内部认证 token，部署时必须更换 |
 | `EPLAN_MAX_UPLOAD_BYTES` | `1073741824` | 单个上传文件最大字节数 |
 | `EPLAN_API_URL` | `http://api:8000` | worker 或 Vite 使用的 API 地址 |
 | `EPLAN_WORKER_POLL_SECONDS` | `2` | worker 无任务时的轮询间隔 |
-| `GROQ_API_KEY` | 空 | 托管 LLM API key |
+| `LLM_PROVIDER` | `api` | `api` 或 `local`；用于区分部署模式 |
+| `LLM_BASE_URL` | 空 | OpenAI-compatible API 根地址 |
+| `LLM_API_KEY` | 空 | 可选 Bearer token；无鉴权的本地服务可留空 |
+| `LLM_MODEL` | 空 | 支持图像输入的模型名称，提交新解析任务前必须配置 |
+| `LLM_TIMEOUT_SECONDS` | `30` | 单次模型请求超时秒数 |
+| `LLM_MAX_TOKENS` | `512` | 分类响应的最大 token 数 |
 
 在 Linux bind mount 场景中，可通过 `.env` 的 `EPLAN_UID` 和 `EPLAN_GID` 让容器进程使用 storage 目录所有者的 UID/GID。
 
@@ -239,5 +281,5 @@ Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`。可通过 `EPLAN_API_URL`
 
 - SQLite 队列适合单个 API 实例；可以横向增加 worker，但暂时不要同时运行多个 API 副本。
 - worker 采用协作式取消，会在解析进度回调处停止，而不是强制终止正在执行的底层调用。
-- 内部 worker 接口已有 token；公开 API 尚未提供用户级鉴权。对公网部署前应在 API 网关或服务层增加认证与权限控制。
+- 内部 worker 接口使用 storage 中自动生成的 token；公开 API 尚未提供用户级鉴权。对公网部署前应在 API 网关或服务层增加认证与权限控制。
 - `pdf_parser/vector_api.py` 仍保留部分旧查询实现，但前端不再启动它的 stdio server；HTTP 边界已经迁入 `api_service`。

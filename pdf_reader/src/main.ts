@@ -87,7 +87,7 @@ type VectorItem = {
   page_number: number
   paint_operator: string
   bbox: BBox
-  commands: Array<Record<string, unknown>>
+  commands?: Array<Record<string, unknown>>
   line_width: number
   effective_line_width: number
   source: ReaderSource
@@ -302,11 +302,19 @@ type PageManifest = {
     image: number
     link: number
   }
+  indexed_counts?: {
+    component?: number
+    vector_path: number
+    text: number
+    image: number
+    link: number
+  }
   warnings: string[]
   data_url: string
 }
 
 type ReaderDocument = {
+  reader_schema_version?: number
   id: string
   title: string
   pdf_url: string
@@ -320,6 +328,16 @@ type Manifest = {
   documents: ReaderDocument[]
 }
 
+type ReaderPreparation = {
+  document_id: string
+  original_filename: string
+  reader_status: 'pending' | 'building' | 'ready' | 'failed'
+  reader_progress: number
+  reader_message: string
+  reader_error?: string | null
+  document_ready: boolean
+}
+
 type PageData = {
   page_number: number
   page_object_ref: string | null
@@ -329,6 +347,13 @@ type PageData = {
   }
   content_streams: string[]
   item_counts: {
+    component?: number
+    vector_path: number
+    text: number
+    image: number
+    link: number
+  }
+  indexed_counts?: {
     component?: number
     vector_path: number
     text: number
@@ -422,6 +447,7 @@ const app = mustQuery<HTMLDivElement>('#app')
 app.innerHTML = `
   <div class="layout">
     <aside class="sidebar">
+      <a class="button viewer-back-link" href="/tasks" aria-label="Back to task dashboard">← Back to Tasks</a>
       <div class="panel">
         <div class="panel-title-row">
           <div>
@@ -429,7 +455,6 @@ app.innerHTML = `
             <h1 class="title">Eplan PDF Object Explorer</h1>
           </div>
         </div>
-        <a class="button viewer-dashboard-link" href="/tasks">Task dashboard</a>
         <p class="muted">Review fully processed PDFs and inspect their generated parsing results.</p>
       </div>
 
@@ -488,7 +513,7 @@ app.innerHTML = `
       <div class="workspace-main">
         <section class="viewer-shell">
           <div class="viewer-topbar">
-            <div id="viewer-status" class="status">Loading manifest...</div>
+            <div id="viewer-status" class="status">Preparing document...</div>
             <div class="viewer-toolbar">
               <button
                 id="area-select-toggle"
@@ -615,6 +640,17 @@ app.innerHTML = `
             </div>
           </div>
           <div id="viewer-scroll" class="viewer-scroll">
+            <div id="reader-preparation" class="reader-preparation" hidden>
+              <div class="reader-preparation-card">
+                <p class="eyebrow">Reader preprocessing</p>
+                <h2>Preprocessing document</h2>
+                <p id="reader-preparation-message" class="muted">Preparing reader data...</p>
+                <div class="reader-preparation-progress">
+                  <div class="reader-preparation-track"><div id="reader-preparation-bar"></div></div>
+                  <strong id="reader-preparation-percent">0%</strong>
+                </div>
+              </div>
+            </div>
             <div id="viewer-stage" class="viewer-stage"></div>
           </div>
         </section>
@@ -693,10 +729,10 @@ app.innerHTML = `
           <div class="inspector-tabs" role="tablist">
             <button
               id="tab-symbols"
-              class="inspector-tab"
+              class="inspector-tab is-active"
               type="button"
               role="tab"
-              aria-selected="false"
+              aria-selected="true"
               data-tab="symbols"
             >
               Symbols
@@ -713,10 +749,10 @@ app.innerHTML = `
             </button>
             <button
               id="tab-info-trace"
-              class="inspector-tab is-active"
+              class="inspector-tab"
               type="button"
               role="tab"
-              aria-selected="true"
+              aria-selected="false"
               data-tab="info-trace"
             >
               Info Trace
@@ -733,10 +769,10 @@ app.innerHTML = `
             </button>
           </div>
 
-          <div id="tab-panel-symbols" class="inspector-tab-panel" role="tabpanel" hidden>
-            <p class="eyebrow">Symbol extraction</p>
-            <h2 class="section-title">Symbol Overview</h2>
-            <label class="field-label" for="symbol-pages-input">Symbol overview pages</label>
+          <div id="tab-panel-symbols" class="inspector-tab-panel" role="tabpanel">
+            <p class="eyebrow">Parsing result</p>
+            <h2 class="section-title">Symbol List</h2>
+            <label class="field-label" for="symbol-pages-input">Symbol overview pages in parsing result</label>
             <div class="symbol-page-controls">
               <input
                 id="symbol-pages-input"
@@ -744,13 +780,14 @@ app.innerHTML = `
                 type="text"
                 inputmode="numeric"
                 spellcheck="false"
-                placeholder="e.g. 5, 6"
+                placeholder="No symbol overview pages"
+                readonly
               />
-              <button id="symbol-add-page" class="button" type="button" title="Add the current page to the list">
+              <button id="symbol-add-page" class="button" type="button" title="Add the current page to the list" hidden disabled>
                 + current
               </button>
             </div>
-            <button id="symbol-extract" class="button symbol-extract-button" type="button">
+            <button id="symbol-extract" class="button symbol-extract-button" type="button" hidden disabled>
               Start extraction
             </button>
             <button
@@ -758,31 +795,32 @@ app.innerHTML = `
               class="button symbol-search-button"
               type="button"
               title="Match each extracted symbol inside the selected entity"
+              hidden
               disabled
             >
               Search in entity
             </button>
-            <p id="symbol-status" class="muted small">Enter the symbol overview page numbers, then start extraction.</p>
+            <p id="symbol-status" class="muted small">Loading symbols from the parsing result...</p>
             <div id="symbol-list" class="symbol-list"></div>
           </div>
 
           <div id="tab-panel-extract-info" class="inspector-tab-panel" role="tabpanel" hidden>
-            <p class="eyebrow">Page extraction</p>
+            <p class="eyebrow">Parsing result</p>
             <h2 class="section-title">Extract Info</h2>
             <p id="extract-symbol-dependency" class="extract-dependency muted small">
-              Run extraction in the Symbols tab first.
+              Loading the current page from the parsing result...
             </p>
-            <label class="extract-option">
+            <label class="extract-option" hidden>
               <input id="extract-llm-gate" type="checkbox" checked />
               <span>Use LLM electrical entity gate (off = dummy)</span>
             </label>
-            <div class="extract-actions">
+            <div class="extract-actions" hidden>
               <button id="extract-info-run" class="button extract-info-button" type="button" disabled>Extract</button>
               <button id="extract-info-cancel" class="button extract-cancel-button" type="button" disabled>Stop</button>
             </div>
             <div class="extract-progress" aria-live="polite">
               <div class="extract-progress-track"><div id="extract-progress-bar" class="extract-progress-bar"></div></div>
-              <p id="extract-info-status" class="muted small">Extract the currently visible page.</p>
+            <p id="extract-info-status" class="muted small">Loading the current page from the parsing result...</p>
             </div>
             <div class="extract-json-search" aria-label="Search extracted JSON objects">
               <select id="extract-json-search-category" class="select extract-json-search-category" aria-label="Extracted object category">
@@ -800,7 +838,7 @@ app.innerHTML = `
             <div id="extract-info-result" class="extract-info-result"></div>
           </div>
 
-          <div id="tab-panel-info-trace" class="inspector-tab-panel" role="tabpanel">
+          <div id="tab-panel-info-trace" class="inspector-tab-panel" role="tabpanel" hidden>
             <p class="eyebrow">Connectivity tracing</p>
             <h2 class="section-title">Info Trace</h2>
             <div class="info-trace-controls">
@@ -918,6 +956,10 @@ const nextPageButton = mustQuery<HTMLButtonElement>('#next-page')
 const docMeta = mustQuery<HTMLDivElement>('#doc-meta')
 const pageMeta = mustQuery<HTMLDivElement>('#page-meta')
 const viewerStatus = mustQuery<HTMLDivElement>('#viewer-status')
+const readerPreparation = mustQuery<HTMLDivElement>('#reader-preparation')
+const readerPreparationBar = mustQuery<HTMLDivElement>('#reader-preparation-bar')
+const readerPreparationPercent = mustQuery<HTMLSpanElement>('#reader-preparation-percent')
+const readerPreparationMessage = mustQuery<HTMLParagraphElement>('#reader-preparation-message')
 const viewerScroll = mustQuery<HTMLDivElement>('#viewer-scroll')
 const viewerStage = mustQuery<HTMLDivElement>('#viewer-stage')
 const playgroundCode = mustQuery<HTMLTextAreaElement>('#playground-code')
@@ -1014,6 +1056,10 @@ let vectorOverlaySuppressedPage: number | null = null
 function confirmLargePageNavigation(pageNumber: number): Promise<LargePageDecision> {
   const targetPage = getPageManifest(pageNumber)
   const vectorCount = countOrZero(targetPage?.item_counts.vector_path)
+  const indexedVectorCount = countOrZero(targetPage?.indexed_counts?.vector_path ?? vectorCount)
+  if (indexedVectorCount < vectorCount) {
+    return Promise.resolve('skip-vectors')
+  }
   if (vectorCount <= LARGE_PAGE_VECTOR_THRESHOLD) {
     return Promise.resolve('full')
   }
@@ -1383,6 +1429,7 @@ const pageCache = new Map<string, PageData>()
 const pdfDocumentCache = new Map<string, Promise<Awaited<ReturnType<typeof loadPdfDocument>>>>()
 const detectionCache = new Map<string, PageDetectionCache>()
 let manifest: Manifest | null = null
+let documentStates: ReaderPreparation[] = []
 let activeDocument: ReaderDocument | null = null
 let activePageNumber = 1
 let activeSelectionId: string | null = null
@@ -1417,9 +1464,7 @@ let symbolMatchBoxes: SymbolMatchBox[] = []
 let activeSymbolHighlight: number | null = null
 let showSymbolMatches = true
 let lastExtractedPages: number[] = []
-let lastExtractedSymbolCount = 0
 let hasSymbolExtractionResult = false
-let isSymbolSearchRunning = false
 let extractInfoResultData: ExtractInfoResult | null = null
 let extractTextOwnership: ExtractedTextOwnership[] = []
 let activeExtractHighlightVectors: ApiPathBase[] = []
@@ -1607,6 +1652,66 @@ async function getPdfDocument(url: string) {
 
 function setStatus(message: string): void {
   viewerStatus.textContent = message
+}
+
+function showReaderPreparation(job: ReaderPreparation): void {
+  const progress = Math.max(0, Math.min(job.reader_progress || 0, 100))
+  readerPreparation.hidden = job.document_ready
+  readerPreparationBar.style.width = `${progress}%`
+  readerPreparationPercent.textContent = `${progress}%`
+  const message = job.reader_error
+    || job.reader_message
+    || (job.reader_status === 'pending' ? 'Waiting to preprocess this document' : `Preprocessing page data for ${job.original_filename}`)
+  readerPreparationMessage.textContent = message
+  setStatus(job.document_ready ? `${job.original_filename} preprocessing complete` : `Preprocessing ${job.original_filename}...`)
+  const index = documentStates.findIndex((document) => document.document_id === job.document_id)
+  if (index >= 0) documentStates[index] = job
+  else documentStates.push(job)
+  const selectedDocumentId = docSelect.value || job.document_id
+  populateDocumentSelect(documentStates)
+  docSelect.value = selectedDocumentId
+}
+
+async function prepareReaderDocument(documentId: string): Promise<void> {
+  let response = await fetch(`/api/v1/documents/${encodeURIComponent(documentId)}/prepare`, {
+    method: 'POST',
+  })
+  while (true) {
+    if (!response.ok) {
+      throw new Error(`Failed to preprocess reader data: ${response.status}`)
+    }
+    const job = (await response.json()) as ReaderPreparation
+    showReaderPreparation(job)
+    if (job.document_ready) {
+      readerPreparation.hidden = true
+      return
+    }
+    if (job.reader_status === 'failed') {
+      throw new Error(job.reader_error || 'Reader preprocessing failed')
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    response = await fetch(`/api/v1/documents/${encodeURIComponent(documentId)}`)
+  }
+}
+
+async function loadDocumentStates(): Promise<ReaderPreparation[]> {
+  const response = await fetch('/api/v1/documents')
+  if (!response.ok) throw new Error(`Failed to list documents: ${response.status}`)
+  return ((await response.json()) as { documents: ReaderPreparation[] }).documents
+}
+
+async function openReaderDocument(documentId: string, updateHistory = true): Promise<void> {
+  await prepareReaderDocument(documentId)
+  const [nextManifest, nextStates] = await Promise.all([loadManifest(), loadDocumentStates()])
+  manifest = nextManifest
+  documentStates = nextStates
+  populateDocumentSelect(documentStates)
+  docSelect.value = documentId
+  const documentData = manifest.documents.find((document) => document.id === documentId)
+  if (!documentData) throw new Error(`Preprocessed document ${documentId} is missing from the manifest.`)
+  if (updateHistory) window.history.pushState(null, '', `/viewer/${documentId}`)
+  await selectDocument(documentData.id)
+  updatePagerButtons()
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -2697,7 +2802,7 @@ function setSelection(item: ReaderItem | null, pageData: PageData | null): void 
   if (!focusExtractInfoForReaderItem(item, pageData)) {
     extractJsonSearchStatus.textContent = extractInfoResultData
       ? 'The selected PDF item has no extracted component ownership.'
-      : 'Run Extract Info to resolve the selected PDF item.'
+      : 'No parsing result is available for the selected PDF item.'
   }
   selectionTitle.textContent = `${titleByKind[item.kind]} ${item.id}`
   sourceCode.classList.remove('empty')
@@ -2828,22 +2933,17 @@ function updateVectorEntityActionButtons(): void {
 }
 
 function updateSymbolSearchButton(): void {
-  symbolSearchBtn.disabled =
-    isSymbolSearchRunning ||
-    !activeDocument ||
-    !getSelectedVectorEntityGroup() ||
-    !lastExtractedPages.length ||
-    lastExtractedSymbolCount === 0
+  symbolSearchBtn.disabled = true
 }
 
 function updateExtractInfoAvailability(): void {
-  const ready = Boolean(activeDocument && hasSymbolExtractionResult && lastExtractedPages.length)
-  extractInfoRunBtn.disabled = !ready || isExtractInfoRunning
-  extractInfoCancelBtn.disabled = !isExtractInfoRunning || extractInfoCancellationRequested
-  extractSymbolDependency.textContent = ready
-    ? `✓ Symbols ready · page${lastExtractedPages.length === 1 ? '' : 's'} ${lastExtractedPages.join(', ')}`
-    : 'Run extraction in the Symbols tab first.'
-  extractSymbolDependency.classList.toggle('is-ready', ready)
+  const available = Boolean(extractInfoResultData)
+  extractInfoRunBtn.disabled = true
+  extractInfoCancelBtn.disabled = true
+  extractSymbolDependency.textContent = available
+    ? 'Read-only · loaded from the document parsing result'
+    : 'No parsing result is available for this page.'
+  extractSymbolDependency.classList.toggle('is-ready', available)
 }
 
 function updateDetectButtons(): void {
@@ -4427,6 +4527,9 @@ async function renderPage(pageNumber: number, options: RenderPageOptions = {}): 
   pageShell.dataset.pageNumber = String(pageNumber)
 
   const skipVectorOverlay = vectorOverlaySuppressedPage === pageNumber
+  const indexedVectorCount = countOrZero(
+    pageData.indexed_counts?.vector_path ?? pageData.item_counts.vector_path,
+  )
 
   const pageHeader = document.createElement('div')
   pageHeader.className = 'page-header'
@@ -4436,20 +4539,26 @@ async function renderPage(pageNumber: number, options: RenderPageOptions = {}): 
       <span>${countOrZero(pageManifest.item_counts.vector_path)} vector, ${countOrZero(pageManifest.item_counts.text)} text, ${countOrZero(pageManifest.item_counts.image)} image, ${countOrZero(pageManifest.item_counts.link)} link</span>
     </div>
   `
-  if (skipVectorOverlay) {
+  if (skipVectorOverlay || indexedVectorCount < pageData.item_counts.vector_path) {
     const notice = document.createElement('div')
     notice.className = 'page-vector-suppressed-notice'
     const label = document.createElement('span')
-    label.textContent = 'Vector overlay hidden for performance.'
-    const loadVectorsBtn = document.createElement('button')
-    loadVectorsBtn.type = 'button'
-    loadVectorsBtn.className = 'button'
-    loadVectorsBtn.textContent = 'Load vectors anyway'
-    loadVectorsBtn.addEventListener('click', () => {
-      vectorOverlaySuppressedPage = null
-      scheduleRender(pageNumber, { preserveSelection: true })
-    })
-    notice.append(label, loadVectorsBtn)
+    const vectorsWereOmitted = indexedVectorCount < pageData.item_counts.vector_path
+    label.textContent = vectorsWereOmitted
+      ? `Dense vector hit targets omitted (${pageData.item_counts.vector_path.toLocaleString()} paths); PDF display is unchanged.`
+      : 'Vector overlay hidden for performance.'
+    notice.append(label)
+    if (!vectorsWereOmitted) {
+      const loadVectorsBtn = document.createElement('button')
+      loadVectorsBtn.type = 'button'
+      loadVectorsBtn.className = 'button'
+      loadVectorsBtn.textContent = 'Load vectors anyway'
+      loadVectorsBtn.addEventListener('click', () => {
+        vectorOverlaySuppressedPage = null
+        scheduleRender(pageNumber, { preserveSelection: true })
+      })
+      notice.append(loadVectorsBtn)
+    }
     pageHeader.appendChild(notice)
   }
   pageShell.appendChild(pageHeader)
@@ -4530,6 +4639,7 @@ async function renderPage(pageNumber: number, options: RenderPageOptions = {}): 
     ['Page object', pageData.page_object_ref ?? 'None'],
     ['Content streams', pageData.content_streams.join(', ') || 'None'],
     ['Vector objects', String(countOrZero(pageData.item_counts.vector_path))],
+    ['Clickable vectors', String(indexedVectorCount)],
     ['Text objects', String(countOrZero(pageData.item_counts.text))],
     ['Image objects', String(countOrZero(pageData.item_counts.image))],
     ['Link objects', String(countOrZero(pageData.item_counts.link))],
@@ -4565,9 +4675,16 @@ async function renderPage(pageNumber: number, options: RenderPageOptions = {}): 
   updateVectorMatchButton()
 }
 
-function populateDocumentSelect(documents: ReaderDocument[]): void {
+function readerStatusLabel(document: ReaderPreparation): string {
+  if (document.document_ready) return 'Complete'
+  if (document.reader_status === 'building') return `Preprocessing ${document.reader_progress}%`
+  if (document.reader_status === 'failed') return 'Preprocess failed'
+  return 'Not preprocessed'
+}
+
+function populateDocumentSelect(documents: ReaderPreparation[]): void {
   docSelect.innerHTML = documents
-    .map((doc) => `<option value="${escapeHtml(doc.id)}">${escapeHtml(doc.title)}</option>`)
+    .map((doc) => `<option value="${escapeHtml(doc.document_id)}">[${readerStatusLabel(doc)}] ${escapeHtml(doc.original_filename)}</option>`)
     .join('')
 }
 
@@ -4612,16 +4729,13 @@ async function selectDocument(documentId: string): Promise<void> {
   renderInfoTraceSteps()
   clearSymbolMatches()
   lastExtractedPages = []
-  lastExtractedSymbolCount = 0
   hasSymbolExtractionResult = false
   symbolList.replaceChildren()
-  setSymbolStatus('Enter the symbol overview page numbers, then start extraction.')
+  setSymbolStatus('Loading symbols from the document parsing result...')
   extractInfoResultData = null
   extractTextOwnership = []
   clearExtractVectorHighlights()
   extractInfoResult.replaceChildren()
-  symbolExtractBtn.textContent = 'Start extraction'
-  extractInfoRunBtn.textContent = 'Extract'
   updateExtractInfoAvailability()
   zoomFactor = 1
   playgroundStash = null
@@ -4711,8 +4825,14 @@ function changeZoom(nextZoomFactor: number, anchor: ZoomAnchor | null): void {
 }
 
 docSelect.addEventListener('change', async () => {
-  await selectDocument(docSelect.value)
-  updatePagerButtons()
+  try {
+    docSelect.disabled = true
+    await openReaderDocument(docSelect.value)
+  } catch (error) {
+    setStatus(`Preprocess failed: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    docSelect.disabled = false
+  }
 })
 
 pageSelect.addEventListener('change', async () => {
@@ -6715,7 +6835,7 @@ async function restorePersistedState(pageNumber: number): Promise<void> {
   extractInfoResult.innerHTML = `
     <div class="extract-info-loading">
       <div class="viewer-loading-spinner"></div>
-      <span>Loading saved extraction result...</span>
+      <span>Loading the document parsing result...</span>
     </div>
   `
   extractInfoStatus.textContent = 'Loading saved extraction result...'
@@ -6735,15 +6855,18 @@ async function restorePersistedState(pageNumber: number): Promise<void> {
       result?: {
         symbols?: SymbolExtractResult | null
         extract_info?: ExtractInfoResult | null
-        extract_info_source?: 'document_result' | 'page_cache' | null
+        extract_info_source?: 'document_result' | null
         document_result_filename?: string | null
       }
     }
     if (activeDocument !== documentAtRequest || activePageNumber !== pageNumber) return
     if (!response.ok || !payload.ok || !payload.result) {
+      symbolList.replaceChildren()
+      setSymbolStatus('Unable to read symbols from the document parsing result.')
       extractInfoResult.replaceChildren()
-      extractInfoRunBtn.textContent = 'Extract'
-      updateExtractProgress(0, 'No saved Extract Info for this page')
+      extractInfoResultData = null
+      updateExtractInfoAvailability()
+      updateExtractProgress(0, 'Unable to read the document parsing result')
       return
     }
 
@@ -6752,9 +6875,15 @@ async function restorePersistedState(pageNumber: number): Promise<void> {
       symbolPagesInput.value = lastExtractedPages.join(', ')
       hasSymbolExtractionResult = true
       renderSymbolResult(payload.result.symbols)
-      symbolExtractBtn.textContent = 'Regenerate symbols'
-      setSymbolStatus(`Restored saved Symbols result from page${lastExtractedPages.length === 1 ? '' : 's'} ${lastExtractedPages.join(', ')}.`)
-      updateExtractInfoAvailability()
+      setSymbolStatus(
+        `Loaded ${payload.result.symbols.records.length} symbol records from ` +
+        `${payload.result.document_result_filename ?? 'the document parsing result'}.`,
+      )
+    } else {
+      symbolList.replaceChildren()
+      lastExtractedPages = []
+      hasSymbolExtractionResult = false
+      setSymbolStatus('No symbol overview is available in the document parsing result.')
     }
     clearExtractVectorHighlights()
     extractInfoResultData = payload.result.extract_info
@@ -6764,23 +6893,23 @@ async function restorePersistedState(pageNumber: number): Promise<void> {
     extractInfoResult.replaceChildren()
     if (extractInfoResultData) {
       renderExtractInfoResult(extractInfoResultData)
-      extractInfoRunBtn.textContent = 'Regenerate'
       updateExtractProgress(
         100,
-        payload.result.extract_info_source === 'document_result'
-          ? `Loaded ${payload.result.document_result_filename ?? 'document parsing result'}`
-          : 'Loaded saved Extract Info',
+        `Loaded page ${pageNumber} from ${payload.result.document_result_filename ?? 'document parsing result'}`,
       )
     } else {
-      extractInfoRunBtn.textContent = 'Extract'
-      updateExtractProgress(0, 'No saved Extract Info for this page')
+      updateExtractProgress(0, `No parsing result is available for page ${pageNumber}`)
     }
+    updateExtractInfoAvailability()
     renderInfoTraceHighlights()
   } catch {
-    // Persistence is an optimization; the normal extraction controls remain usable.
     if (activeDocument === documentAtRequest && activePageNumber === pageNumber) {
+      symbolList.replaceChildren()
+      setSymbolStatus('Failed to load symbols from the document parsing result.')
       extractInfoResult.replaceChildren()
-      updateExtractProgress(0, 'Failed to load saved Extract Info')
+      extractInfoResultData = null
+      updateExtractInfoAvailability()
+      updateExtractProgress(0, 'Failed to load the document parsing result')
     }
   }
 }
@@ -6854,7 +6983,6 @@ async function runExtractInfo(): Promise<void> {
     } else if (message.includes('Symbol extraction result is unavailable')) {
       hasSymbolExtractionResult = false
       lastExtractedPages = []
-      lastExtractedSymbolCount = 0
       updateExtractInfoAvailability()
       extractInfoStatus.textContent = `Extraction failed: ${message}`
     } else {
@@ -6884,7 +7012,6 @@ async function cancelExtractInfo(): Promise<void> {
     extractInfoAbortController?.abort()
     hasSymbolExtractionResult = false
     lastExtractedPages = []
-    lastExtractedSymbolCount = 0
     extractInfoResultData = null
     extractTextOwnership = []
     clearExtractVectorHighlights()
@@ -6970,7 +7097,6 @@ function buildSymbolPreview(symbol: ApiSymbol): SVGSVGElement {
 
 function renderSymbolResult(result: SymbolExtractResult): void {
   symbolList.replaceChildren()
-  lastExtractedSymbolCount = result.records.length
   updateSymbolSearchButton()
   const pageLabel = `page${result.pages.length === 1 ? '' : 's'} ${result.pages.join(', ')}`
   if (!result.records.length) {
@@ -6978,7 +7104,7 @@ function renderSymbolResult(result: SymbolExtractResult): void {
     return
   }
   setSymbolStatus(
-    `Extracted ${result.records.length} component${result.records.length === 1 ? '' : 's'} ` +
+    `Loaded ${result.records.length} component${result.records.length === 1 ? '' : 's'} ` +
       `(${result.symbols.length} unique shape${result.symbols.length === 1 ? '' : 's'}) from ${pageLabel}.`,
   )
   for (const record of result.records) {
@@ -7041,7 +7167,6 @@ async function runSymbolExtraction(): Promise<void> {
   symbolExtractBtn.disabled = true
   hasSymbolExtractionResult = false
   lastExtractedPages = []
-  lastExtractedSymbolCount = 0
   updateExtractInfoAvailability()
   setSymbolStatus(`Extracting symbols from page${pages.length === 1 ? '' : 's'} ${pages.join(', ')}...`)
   try {
@@ -7073,7 +7198,6 @@ async function runSymbolExtraction(): Promise<void> {
   } catch (error) {
     symbolList.replaceChildren()
     lastExtractedPages = []
-    lastExtractedSymbolCount = 0
     hasSymbolExtractionResult = false
     updateSymbolSearchButton()
     updateExtractInfoAvailability()
@@ -7166,7 +7290,6 @@ async function runSymbolSearch(): Promise<void> {
     setSymbolSearchResultStatus(cachedResult, entityIndex, true)
     return
   }
-  isSymbolSearchRunning = true
   updateSymbolSearchButton()
   setSymbolStatus(`Matching symbols inside entity ${entityIndex + 1} on page ${searchPage}...`)
   try {
@@ -7204,31 +7327,19 @@ async function runSymbolSearch(): Promise<void> {
   } catch (error) {
     setSymbolStatus(`Symbol search failed: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
-    isSymbolSearchRunning = false
     updateSymbolSearchButton()
   }
 }
 
-symbolAddPageBtn.addEventListener('click', () => {
-  if (!activeDocument) {
-    setSymbolStatus('Open a PDF before adding pages.')
-    return
-  }
-  const pages = new Set(parseSymbolPages(symbolPagesInput.value))
-  pages.add(activePageNumber)
-  symbolPagesInput.value = [...pages].sort((a, b) => a - b).join(', ')
-})
-
+// Retain the legacy handlers behind disabled, hidden controls for now so the
+// implementation can be removed separately without mixing that cleanup into
+// the read-only result-viewer migration. These controls cannot be invoked from
+// the UI.
+symbolAddPageBtn.addEventListener('click', () => undefined)
 symbolExtractBtn.addEventListener('click', () => void runSymbolExtraction())
 symbolSearchBtn.addEventListener('click', () => void runSymbolSearch())
 extractInfoRunBtn.addEventListener('click', () => void runExtractInfo())
 extractInfoCancelBtn.addEventListener('click', () => void cancelExtractInfo())
-symbolPagesInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') {
-    event.preventDefault()
-    void runSymbolExtraction()
-  }
-})
 
 boxDetectBtn.addEventListener('click', async () => {
   if (!activeDocument || !currentPageState) {
@@ -7700,20 +7811,27 @@ async function bootstrap(): Promise<void> {
     initResizableLayout()
     initLayerToggles()
     initPlayground()
-    manifest = await loadManifest()
-    if (!manifest.documents.length) {
-      setStatus('No PDF data available. Run the data generation script first.')
+    documentStates = await loadDocumentStates()
+    populateDocumentSelect(documentStates)
+    let requestedDocumentId = window.location.pathname.match(/^\/viewer\/([^/]+)/)?.[1]
+    if (!requestedDocumentId || !documentStates.some((document) => document.document_id === requestedDocumentId)) {
+      requestedDocumentId = documentStates[0]?.document_id
+    }
+    if (!requestedDocumentId) {
+      setStatus('No parsed PDF is available. Submit a task from the Tasks page first.')
       return
     }
-    populateDocumentSelect(manifest.documents)
-    const requestedDocumentId = window.location.pathname.match(/^\/viewer\/([^/]+)/)?.[1]
-    const initialDocument = manifest.documents.find((document) => document.id === requestedDocumentId)
-      ?? manifest.documents[0]
-    await selectDocument(initialDocument.id)
-    updatePagerButtons()
+    docSelect.value = requestedDocumentId
+    window.history.replaceState(null, '', `/viewer/${requestedDocumentId}`)
+    docSelect.disabled = true
+    try {
+      await openReaderDocument(requestedDocumentId, false)
+    } finally {
+      docSelect.disabled = false
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    setStatus(`Load failed: ${message}`)
+    setStatus(`Preprocess failed: ${message}`)
   }
 }
 

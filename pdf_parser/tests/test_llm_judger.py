@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 from tempfile import TemporaryDirectory
 
 from pdf_parser.llm_judger.diagram_judger import (
@@ -47,8 +48,8 @@ def test_classifies_image_and_builds_openai_compatible_request() -> None:
     assert captured["headers"]["User-Agent"] == "EplanMaster-LLM-Judger/1.0"
     image_url = captured["payload"]["messages"][1]["content"][1]["image_url"]["url"]
     assert image_url.startswith("data:image/png;base64,")
-    assert captured["payload"]["reasoning_effort"] == "none"
-    assert captured["payload"]["max_completion_tokens"] == 512
+    assert "reasoning_effort" not in captured["payload"]
+    assert captured["payload"]["max_tokens"] == 512
     assert captured["payload"]["_max_retries"] == 1
 
 
@@ -63,7 +64,10 @@ def test_rejects_unknown_model_label() -> None:
             }]
         }
 
-    classifier = DiagramClassifier(LLMConfig(model="vision-model"), transport=transport)
+    classifier = DiagramClassifier(
+        LLMConfig(model="vision-model", base_url="http://llm.test/v1"),
+        transport=transport,
+    )
     try:
         classifier.classify(b"image", mime_type="image/jpeg")
     except DiagramClassificationError as exc:
@@ -72,12 +76,22 @@ def test_rejects_unknown_model_label() -> None:
         raise AssertionError("Expected invalid diagram type to be rejected")
 
 
-def test_groq_defaults_keep_api_key_as_an_explicit_parameter() -> None:
-    config = LLMConfig.groq(api_key="test-key")
+def test_remote_openai_compatible_settings_load_from_environment() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "LLM_PROVIDER": "api",
+            "LLM_MODEL": "vendor/vision-model",
+            "LLM_BASE_URL": "https://llm.example.com/v1",
+            "LLM_API_KEY": "test-key",
+        },
+        clear=False,
+    ):
+        config = LLMConfig.from_env()
 
     assert config.provider == "api"
-    assert config.model == "qwen/qwen3.6-27b"
-    assert config.base_url == "https://api.groq.com/openai/v1"
+    assert config.model == "vendor/vision-model"
+    assert config.base_url == "https://llm.example.com/v1"
     assert config.api_key == "test-key"
 
 
@@ -134,6 +148,7 @@ def test_persistent_classifier_calls_llm_once_then_restores_from_storage() -> No
         storage_directory = Path(directory) / "storage"
         config = LLMConfig(
             model="vision-model",
+            base_url="http://llm.test/v1",
             storage_directory=str(storage_directory),
         )
 

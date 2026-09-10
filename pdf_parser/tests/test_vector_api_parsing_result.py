@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pdf_parser.vector_api import _document_extract_info, _document_trace_index
+from pdf_parser.vector_api import (
+    _document_extract_info,
+    _document_symbol_result,
+    _document_trace_index,
+)
 
 
 def _diagram() -> dict[str, list[object]]:
@@ -110,6 +114,59 @@ def test_document_result_supports_document_scoped_api_layout() -> None:
         assert filename == "result.json"
         assert result is not None
         assert result["page_number"] == 1
+
+
+def test_document_symbol_result_projects_parser_output_without_reextracting() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        pdf_path = root / "data" / "doc_123" / "source.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"%PDF")
+        result_root = root / "results"
+        result_path = result_root / "doc_123" / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text(
+            json.dumps({
+                "pages": {
+                    "5": {"page_type": "symbol_overview"},
+                    "6": {"page_type": "symbol_overview"},
+                    "7": {"page_type": "multi"},
+                },
+                "symbol_overview": {
+                    "symbols": [[{
+                        "type": "line",
+                        "points": [[10, 20], [14, 25]],
+                        "path_meta": {"dashes": "[3 2] 0"},
+                    }]],
+                    "records": [{
+                        "symbol": 0,
+                        "type": "contactor",
+                        "descriptions": ["K1", "main contactor"],
+                    }],
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        result, filename = _document_symbol_result(pdf_path, result_root=result_root)
+
+        assert filename == "result.json"
+        assert result is not None
+        assert result["pages"] == [5, 6]
+        assert result["records"] == [{
+            "symbol": 0,
+            "name": "contactor",
+            "description": "K1; main contactor",
+        }]
+        assert result["symbols"] == [{
+            "shapes": [{
+                "type": "line",
+                "points": [[0.0, 0.0], [4.0, 5.0]],
+                "dashed": True,
+            }],
+            "width": 4.0,
+            "height": 5.0,
+        }]
 
 
 def test_document_trace_index_keeps_one_transfer_record_for_bidirectional_client_use() -> None:

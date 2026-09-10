@@ -9,7 +9,7 @@ from pdf_parser.llm_judger import DiagramClassifier, LLMConfig
 
 
 def _resolve_llm_config(args: argparse.Namespace) -> LLMConfig:
-    base_config = LLMConfig.local() if args.provider == "local" else LLMConfig()
+    base_config = LLMConfig.local() if args.provider == "local" else LLMConfig.from_env()
     return LLMConfig(
         provider=args.provider,
         model=args.model or base_config.model,

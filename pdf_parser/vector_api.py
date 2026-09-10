@@ -50,7 +50,7 @@ SYMBOL_CACHE_LIMIT = PARSER_CONFIG.api_cache.symbol_limit
 # When two symbol matches overlap by more than this fraction of the smaller box,
 # they are treated as the same physical mark and only the richer symbol is kept.
 SYMBOL_MATCH_OVERLAP_RATIO = PARSER_CONFIG.vector_matcher.symbol_overlap_ratio
-DEFAULT_LLM_CONFIG = LLMConfig()
+DEFAULT_LLM_CONFIG = LLMConfig.from_env()
 PERSISTENCE_VERSION = 14
 PERSISTENCE_ROOT = resolve_repo_relative("./storage/cache/frontend")
 PARSING_RESULT_ROOT = resolve_repo_relative("./storage/output/pdf_parsing_result")
@@ -155,6 +155,92 @@ def _load_document_result(
         document_result = loaded
         _lru_put(_document_result_cache, cache_key, document_result, 1)
     return document_result, result_path.name
+
+
+def _document_symbol_result(
+    pdf_path: Path,
+    *,
+    result_root: Path = PARSING_RESULT_ROOT,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Project the parser's symbol_overview into the reader's read-only format."""
+    document_result, result_filename = _load_document_result(
+        pdf_path,
+        result_root=result_root,
+    )
+    if document_result is None:
+        return None, result_filename
+    overview = document_result.get("symbol_overview")
+    if not isinstance(overview, dict):
+        return None, result_filename
+
+    raw_symbols = overview.get("symbols", [])
+    raw_records = overview.get("records", [])
+    if not isinstance(raw_symbols, list) or not isinstance(raw_records, list):
+        return None, result_filename
+
+    symbols: list[dict[str, Any]] = []
+    for group in raw_symbols:
+        vectors = group if isinstance(group, list) else []
+        valid_vectors: list[tuple[dict[str, Any], list[list[float]]]] = []
+        all_points: list[list[float]] = []
+        for vector in vectors:
+            if not isinstance(vector, dict):
+                continue
+            points = [
+                [float(point[0]), float(point[1])]
+                for point in vector.get("points", [])
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+            if not points:
+                continue
+            valid_vectors.append((vector, points))
+            all_points.extend(points)
+        x0 = min((point[0] for point in all_points), default=0.0)
+        y0 = min((point[1] for point in all_points), default=0.0)
+        x1 = max((point[0] for point in all_points), default=x0)
+        y1 = max((point[1] for point in all_points), default=y0)
+        shapes = []
+        for vector, points in valid_vectors:
+            path_meta = vector.get("path_meta", {})
+            dashes = path_meta.get("dashes") if isinstance(path_meta, dict) else None
+            shapes.append({
+                "type": vector.get("type"),
+                "points": [[px - x0, py - y0] for px, py in points],
+                "dashed": bool(dashes and str(dashes).strip() not in {"[] 0", "[]"}),
+            })
+        symbols.append({
+            "shapes": shapes,
+            "width": float(x1 - x0),
+            "height": float(y1 - y0),
+        })
+
+    records = []
+    for record in raw_records:
+        if not isinstance(record, dict):
+            continue
+        description = record.get("descriptions", "")
+        if isinstance(description, list):
+            description = "; ".join(str(value) for value in description)
+        records.append({
+            "symbol": int(record.get("symbol", 0)),
+            "name": str(record.get("type") or "(unnamed)"),
+            "description": str(description or ""),
+        })
+
+    pages = document_result.get("pages", {})
+    symbol_pages = sorted(
+        int(page_number)
+        for page_number, page_result in pages.items()
+        if isinstance(page_result, dict)
+        and page_result.get("page_type") == "symbol_overview"
+        and str(page_number).isdigit()
+    ) if isinstance(pages, dict) else []
+    return {
+        "category": "symbols",
+        "symbols": symbols,
+        "records": records,
+        "pages": symbol_pages,
+    }, result_filename
 
 
 def _document_trace_index(
@@ -802,6 +888,8 @@ def _extract_page_info(
     entity_results: list[dict[str, Any]] = []
     remaining_vectors: list[PathBase] = []
 
+    # Interactive page extraction uses an isolated temporary directory that is
+    # removed as soon as the request finishes; entity previews never reach storage.
     with TemporaryDirectory() as image_directory:
         for entity_index, entity in enumerate(entities):
             progress = 22 + int(50 * (entity_index + 1) / max(len(entities), 1))
@@ -952,31 +1040,18 @@ def handle(payload: dict[str, Any], progress_callback: Any | None = None) -> dic
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     if mode == "persisted_state":
-        restored_symbols = _load_persisted_symbols(pdf_path)
-        symbols_result = None
-        if restored_symbols is not None:
-            catalog, symbols_result, symbol_pages = restored_symbols
-            cache_key = _symbol_cache_key(pdf_path, symbol_pages, payload)
-            _lru_put(_symbol_cache, cache_key, catalog, SYMBOL_CACHE_LIMIT)
+        symbols_result, symbols_result_filename = _document_symbol_result(pdf_path)
         document_extract_info, document_result_filename = _document_extract_info(
             pdf_path,
             page,
         )
-        persisted_extract_info = (
-            document_extract_info
-            if document_extract_info is not None
-            else _load_persisted_extract_info(pdf_path, page)
-        )
         return {
             "category": "persisted_state",
             "symbols": symbols_result,
-            "extract_info": persisted_extract_info,
-            "extract_info_source": (
-                "document_result"
-                if document_extract_info is not None
-                else "page_cache" if persisted_extract_info is not None else None
-            ),
-            "document_result_filename": document_result_filename,
+            "symbols_source": "document_result" if symbols_result is not None else None,
+            "extract_info": document_extract_info,
+            "extract_info_source": "document_result" if document_extract_info is not None else None,
+            "document_result_filename": document_result_filename or symbols_result_filename,
         }
 
     if mode == "trace_index":

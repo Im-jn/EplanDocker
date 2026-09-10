@@ -3,16 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import threading
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import fitz
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from api_service import database
 from eplan_runtime import (
@@ -24,7 +24,7 @@ from eplan_runtime import (
     TEMP_ROOT,
     ensure_storage,
 )
-from api_service.publisher import publisher_loop
+from api_service.publisher import request_publish
 from pdf_parser.query_engine import query as handle_query
 
 
@@ -32,7 +32,7 @@ def _job_response(job: dict[str, Any]) -> dict[str, Any]:
     job = dict(job)
     job["status_url"] = f"/api/v1/parsing-jobs/{job['id']}"
     job["result_url"] = f"/api/v1/parsing-jobs/{job['id']}/result"
-    if job.get("document_ready"):
+    if job.get("status") == "succeeded":
         job["viewer_url"] = f"/viewer/{job['document_id']}"
     job.pop("result_path", None)
     return job
@@ -71,6 +71,46 @@ def _inspect_pdf(path: Path) -> int:
         raise
     except Exception as exc:
         raise HTTPException(422, f"Invalid or unreadable PDF: {exc}") from exc
+
+
+def _document_storage_paths(document_id: str) -> tuple[Path, Path, Path]:
+    if not document_id.startswith("doc_") or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in document_id):
+        raise HTTPException(422, "Invalid document id")
+    return PDF_ROOT / document_id, RESULT_ROOT / document_id, READER_ROOT / document_id
+
+
+def _remove_document_artifacts(document_id: str, *, keep_pdf: bool = False) -> None:
+    pdf_directory, result_directory, reader_directory = _document_storage_paths(document_id)
+    targets = (result_directory, reader_directory) if keep_pdf else (pdf_directory, result_directory, reader_directory)
+    for target in targets:
+        if target.is_dir():
+            shutil.rmtree(target)
+
+
+def _cached_pdf_index() -> dict[str, dict[str, Any]]:
+    jobs_by_document: dict[str, dict[str, Any]] = {}
+    for job in database.list_jobs(limit=500):
+        jobs_by_document.setdefault(str(job["document_id"]), job)
+    entries: dict[str, dict[str, Any]] = {}
+    for path in PDF_ROOT.rglob("*.pdf"):
+        relative_path = path.relative_to(PDF_ROOT).as_posix()
+        cache_id = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:24]
+        document_id = path.parent.name if path.name == "source.pdf" and path.parent.parent == PDF_ROOT else None
+        job = jobs_by_document.get(document_id or "")
+        stat = path.stat()
+        entries[cache_id] = {
+            "cache_id": cache_id,
+            "document_id": document_id,
+            "filename": job["original_filename"] if job else path.name,
+            "relative_path": relative_path,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "page_count": job["page_count"] if job else None,
+            "job_id": job["id"] if job else None,
+            "status": job["status"] if job else "cached",
+            "reader_status": job["reader_status"] if job else None,
+        }
+    return entries
 
 
 def _store_upload(upload: UploadFile, document_id: str) -> tuple[Path, str, int]:
@@ -146,12 +186,8 @@ def _require_internal_token(token: str | None) -> None:
 async def lifespan(_: FastAPI):
     ensure_storage()
     database.initialize()
-    stop_event = threading.Event()
-    publisher = threading.Thread(target=publisher_loop, args=(stop_event,), daemon=True)
-    publisher.start()
+    database.recover_interrupted_publish_jobs()
     yield
-    stop_event.set()
-    publisher.join(timeout=10)
 
 
 app = FastAPI(
@@ -248,12 +284,47 @@ def read_parsing_job(job_id: str) -> dict[str, Any]:
     return _job_response(job)
 
 
-@app.delete("/api/v1/parsing-jobs/{job_id}")
+@app.post("/api/v1/parsing-jobs/{job_id}/cancel")
 def cancel_parsing_job(job_id: str) -> dict[str, Any]:
     job = database.request_cancel(job_id)
     if job is None:
         raise HTTPException(404, "Job not found or no longer cancellable")
     return _job_response(job)
+
+
+@app.post("/api/v1/parsing-jobs/{job_id}/pause")
+def pause_parsing_job(job_id: str) -> dict[str, Any]:
+    before = database.get_job(job_id)
+    if before is None:
+        raise HTTPException(404, "Job not found")
+    if before["status"] not in {"queued", "running"}:
+        raise HTTPException(409, f"Job cannot be paused from status {before['status']}")
+    return _job_response(database.request_pause(job_id) or before)
+
+
+@app.post("/api/v1/parsing-jobs/{job_id}/resume")
+def resume_parsing_job(job_id: str) -> dict[str, Any]:
+    before = database.get_job(job_id)
+    if before is None:
+        raise HTTPException(404, "Job not found")
+    if before["status"] != "paused":
+        raise HTTPException(409, f"Job cannot be resumed from status {before['status']}")
+    return _job_response(database.resume_job(job_id) or before)
+
+
+@app.delete("/api/v1/parsing-jobs/{job_id}")
+def delete_parsing_job(job_id: str) -> JSONResponse:
+    job = database.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job["reader_status"] == "building":
+        raise HTTPException(409, "Reader preprocessing is active; wait for it to finish before deletion")
+    found, deferred = database.request_document_delete(str(job["document_id"]))
+    if not found:
+        raise HTTPException(404, "Job not found")
+    if not deferred:
+        _remove_document_artifacts(str(job["document_id"]))
+    return JSONResponse({"deleted": not deferred, "deferred": deferred}, status_code=202 if deferred else 200)
 
 
 @app.get("/api/v1/parsing-jobs/{job_id}/result")
@@ -282,7 +353,79 @@ def download_parsing_result(job_id: str) -> FileResponse:
 
 @app.get("/api/v1/documents")
 def list_documents() -> dict[str, Any]:
-    return {"documents": [_job_response(job) for job in database.list_ready_documents()]}
+    return {"documents": [_job_response(job) for job in database.list_completed_documents()]}
+
+
+@app.get("/api/v1/cached-pdfs")
+def list_cached_pdfs() -> dict[str, Any]:
+    return {"pdfs": list(_cached_pdf_index().values())}
+
+
+@app.post("/api/v1/cached-pdfs/{cache_id}/reprocess", status_code=202)
+def reprocess_cached_pdf(cache_id: str) -> dict[str, Any]:
+    entry = _cached_pdf_index().get(cache_id)
+    if entry is None:
+        raise HTTPException(404, "Cached PDF not found")
+    source_path = PDF_ROOT / str(entry["relative_path"])
+    document_id = entry.get("document_id")
+    if document_id:
+        current = database.get_job(str(entry["job_id"])) if entry.get("job_id") else None
+        if current and current["status"] in {"running", "pause_requested", "delete_requested", "cancel_requested"}:
+            raise HTTPException(409, f"Document is currently {current['status']}")
+        _remove_document_artifacts(str(document_id), keep_pdf=True)
+        job = database.reset_document_job(str(document_id))
+        if job is None:
+            raise HTTPException(404, "Cached document record not found")
+        return _job_response(job)
+
+    document_id = f"doc_{uuid.uuid4().hex}"
+    target_directory, _, _ = _document_storage_paths(document_id)
+    target_directory.mkdir(parents=True, exist_ok=False)
+    target_path = target_directory / "source.pdf"
+    source_path.replace(target_path)
+    page_count = _inspect_pdf(target_path)
+    digest = hashlib.sha256()
+    with target_path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    job = database.create_job({
+        "id": f"job_{uuid.uuid4().hex}",
+        "batch_id": None,
+        "document_id": document_id,
+        "original_filename": str(entry["filename"]),
+        "source_sha256": digest.hexdigest(),
+        "source_size": target_path.stat().st_size,
+        "page_count": page_count,
+        "pages": list(range(1, page_count + 1)),
+        "strict_pages": False,
+        "idempotency_key": None,
+    })
+    return _job_response(job)
+
+
+@app.delete("/api/v1/cached-pdfs/{cache_id}")
+def delete_cached_pdf(cache_id: str) -> JSONResponse:
+    entry = _cached_pdf_index().get(cache_id)
+    if entry is None:
+        raise HTTPException(404, "Cached PDF not found")
+    document_id = entry.get("document_id")
+    if document_id:
+        job = database.get_job(str(entry["job_id"])) if entry.get("job_id") else None
+        if job and job["reader_status"] == "building":
+            raise HTTPException(409, "Reader preprocessing is active; wait for it to finish before deletion")
+        found, deferred = database.request_document_delete(str(document_id))
+        if found and deferred:
+            return JSONResponse({"deleted": False, "deferred": True}, status_code=202)
+        _remove_document_artifacts(str(document_id))
+        if found:
+            database.delete_document_records(str(document_id))
+        return JSONResponse({"deleted": True, "deferred": False})
+
+    source_path = (PDF_ROOT / str(entry["relative_path"])).resolve()
+    if source_path.parent != PDF_ROOT.resolve():
+        raise HTTPException(422, "Unsupported cached PDF location")
+    source_path.unlink(missing_ok=True)
+    return JSONResponse({"deleted": True, "deferred": False})
 
 
 @app.get("/api/v1/documents/manifest")
@@ -299,7 +442,15 @@ def reader_manifest() -> dict[str, Any]:
 
 @app.get("/api/v1/documents/{document_id}")
 def read_document(document_id: str) -> dict[str, Any]:
-    job = database.get_document(document_id, ready_only=True)
+    job = database.get_document(document_id)
+    if job is None:
+        raise HTTPException(404, "Completed document not found")
+    return _job_response(job)
+
+
+@app.post("/api/v1/documents/{document_id}/prepare", status_code=202)
+def prepare_document(document_id: str) -> dict[str, Any]:
+    job = request_publish(document_id)
     if job is None:
         raise HTTPException(404, "Completed document not found")
     return _job_response(job)
@@ -331,7 +482,7 @@ def read_document_page(document_id: str, page_number: int) -> FileResponse:
         raise HTTPException(404, "Completed document not found")
     page_path = READER_ROOT / document_id / "pages" / f"page-{page_number:04d}.json"
     if not page_path.is_file():
-        raise HTTPException(404, "Page data not found")
+        raise HTTPException(404, "Preprocessed page data not found")
     return FileResponse(page_path, media_type="application/json")
 
 
@@ -369,11 +520,11 @@ async def query_document(request: Request) -> JSONResponse:
 
 
 @app.post("/internal/v1/worker/jobs/claim")
-def worker_claim(x_internal_token: str | None = Header(None)) -> JSONResponse:
+def worker_claim(x_internal_token: str | None = Header(None)) -> Response:
     _require_internal_token(x_internal_token)
     job = database.claim_job()
     if job is None:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     return JSONResponse(job)
 
 
@@ -393,7 +544,11 @@ async def worker_progress(
     )
     if job is None:
         raise HTTPException(404, "Job not found")
-    return {"cancel_requested": job["status"] == "cancel_requested"}
+    return {
+        "cancel_requested": job["status"] == "cancel_requested",
+        "pause_requested": job["status"] == "pause_requested",
+        "delete_requested": job["status"] == "delete_requested",
+    }
 
 
 @app.post("/internal/v1/worker/jobs/{job_id}/complete")
@@ -404,6 +559,12 @@ async def worker_complete(
 ) -> dict[str, bool]:
     _require_internal_token(x_internal_token)
     payload = await request.json()
+    current = database.get_job(job_id)
+    if current and current["status"] == "delete_requested":
+        document_id = str(current["document_id"])
+        database.delete_document_records(document_id)
+        _remove_document_artifacts(document_id)
+        return {"ok": True}
     database.finish_job(job_id, status="succeeded", result_path=str(payload.get("result_path") or ""))
     return {"ok": True}
 
@@ -416,6 +577,15 @@ async def worker_fail(
 ) -> dict[str, bool]:
     _require_internal_token(x_internal_token)
     payload = await request.json()
+    current = database.get_job(job_id)
+    if current and current["status"] == "delete_requested":
+        document_id = str(current["document_id"])
+        database.delete_document_records(document_id)
+        _remove_document_artifacts(document_id)
+        return {"ok": True}
+    if payload.get("paused"):
+        database.finish_pause(job_id)
+        return {"ok": True}
     status = "cancelled" if payload.get("cancelled") else "failed"
     database.finish_job(job_id, status=status, error=str(payload.get("error") or status))
     return {"ok": True}
