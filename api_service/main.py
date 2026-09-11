@@ -7,14 +7,22 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import fitz
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from api_service import database
+from api_service.logging_config import (
+    bind_request_id,
+    configure_logging,
+    get_logger,
+    reset_request_id,
+)
 from eplan_runtime import (
     INTERNAL_TOKEN,
     MAX_UPLOAD_BYTES,
@@ -28,11 +36,16 @@ from api_service.publisher import request_publish
 from pdf_parser.query_engine import query as handle_query
 
 
+logger = get_logger("api")
+
+
 def _job_response(job: dict[str, Any]) -> dict[str, Any]:
     job = dict(job)
+    source_available = (PDF_ROOT / str(job["document_id"]) / "source.pdf").is_file()
     job["status_url"] = f"/api/v1/parsing-jobs/{job['id']}"
     job["result_url"] = f"/api/v1/parsing-jobs/{job['id']}/result"
-    if job.get("status") == "succeeded":
+    job["source_available"] = source_available
+    if job.get("status") == "succeeded" and source_available:
         job["viewer_url"] = f"/viewer/{job['document_id']}"
     job.pop("result_path", None)
     return job
@@ -87,6 +100,55 @@ def _remove_document_artifacts(document_id: str, *, keep_pdf: bool = False) -> N
             shutil.rmtree(target)
 
 
+def _remove_cached_pdf(document_id: str) -> None:
+    pdf_directory, _, _ = _document_storage_paths(document_id)
+    if pdf_directory.is_dir():
+        shutil.rmtree(pdf_directory)
+
+
+def _write_pdf_metadata(document_id: str, job: dict[str, Any]) -> None:
+    pdf_directory, _, _ = _document_storage_paths(document_id)
+    if not pdf_directory.is_dir():
+        return
+    (pdf_directory / "metadata.json").write_text(
+        json.dumps(
+            {
+                "filename": str(job["original_filename"]),
+                "page_count": int(job["page_count"]),
+                "source_sha256": str(job["source_sha256"]),
+                "source_size": int(job["source_size"]),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def _read_pdf_metadata(path: Path) -> dict[str, Any]:
+    metadata_path = path.parent / "metadata.json"
+    try:
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _finish_deferred_delete(job: dict[str, Any]) -> None:
+    """Finalize a worker-acknowledged delete without conflating job and PDF data."""
+    job_id = str(job["id"])
+    document_id = str(job["document_id"])
+    delete_pdf = bool(job.get("delete_pdf"))
+    database.delete_job_record(job_id)
+    if delete_pdf:
+        if not database.has_incomplete_document(document_id):
+            _remove_cached_pdf(document_id)
+            if not database.has_completed_document(document_id):
+                _remove_document_artifacts(document_id, keep_pdf=True)
+    else:
+        _remove_document_artifacts(document_id, keep_pdf=True)
+
+
 def _cached_pdf_index() -> dict[str, dict[str, Any]]:
     jobs_by_document: dict[str, dict[str, Any]] = {}
     for job in database.list_jobs(limit=500):
@@ -97,15 +159,16 @@ def _cached_pdf_index() -> dict[str, dict[str, Any]]:
         cache_id = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:24]
         document_id = path.parent.name if path.name == "source.pdf" and path.parent.parent == PDF_ROOT else None
         job = jobs_by_document.get(document_id or "")
+        metadata = _read_pdf_metadata(path)
         stat = path.stat()
         entries[cache_id] = {
             "cache_id": cache_id,
             "document_id": document_id,
-            "filename": job["original_filename"] if job else path.name,
+            "filename": job["original_filename"] if job else metadata.get("filename", path.name),
             "relative_path": relative_path,
             "size": stat.st_size,
             "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-            "page_count": job["page_count"] if job else None,
+            "page_count": job["page_count"] if job else metadata.get("page_count"),
             "job_id": job["id"] if job else None,
             "status": job["status"] if job else "cached",
             "reader_status": job["reader_status"] if job else None,
@@ -174,20 +237,38 @@ def _create_uploaded_job(
             "idempotency_key": idempotency_key,
         }
     )
+    _write_pdf_metadata(document_id, job)
+    logger.info(
+        "Parsing job submitted",
+        extra={
+            "action": "job_submitted",
+            "job_id": job_id,
+            "document_id": document_id,
+            "batch_id": batch_id,
+            "document_name": job["original_filename"],
+            "total": page_count,
+        },
+    )
     return job
 
 
 def _require_internal_token(token: str | None) -> None:
     if not token or token != INTERNAL_TOKEN:
+        logger.warning("Rejected worker request with invalid internal token")
         raise HTTPException(401, "Invalid worker token")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_storage()
+    log_path = configure_logging()
     database.initialize()
     database.recover_interrupted_publish_jobs()
-    yield
+    logger.info("API service started", extra={"action": "service_started", "path": str(log_path)})
+    try:
+        yield
+    finally:
+        logger.info("API service stopped", extra={"action": "service_stopped"})
 
 
 app = FastAPI(
@@ -196,6 +277,98 @@ app = FastAPI(
     description="Submit PDF parsing jobs and consume completed parsing results.",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(HTTPException)
+async def log_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
+    log_method = logger.error if exc.status_code >= 500 else logger.warning
+    log_method(
+        f"API request rejected: {exc.detail}",
+        extra={
+            "action": "request_rejected",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": exc.status_code,
+            "client": request.client.host if request.client else None,
+        },
+    )
+    return JSONResponse(
+        {"detail": exc.detail},
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def log_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    summary = [
+        {"location": ".".join(str(part) for part in error["loc"]), "type": error["type"]}
+        for error in exc.errors()
+    ]
+    logger.warning(
+        f"API request validation failed: {summary}",
+        extra={
+            "action": "validation_failed",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": 422,
+            "client": request.client.host if request.client else None,
+        },
+    )
+    return JSONResponse({"detail": exc.errors()}, status_code=422)
+
+
+@app.middleware("http")
+async def log_request(request: Request, call_next: Any) -> Response:
+    request_id = request.headers.get("x-request-id", "").strip()[:128] or uuid.uuid4().hex
+    request_token = bind_request_id(request_id)
+    started_at = perf_counter()
+    details = {
+        "request_id": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "client": request.client.host if request.client else None,
+    }
+    try:
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            logger.exception(
+                "Unhandled API request failure",
+                extra={**details, "duration_ms": round((perf_counter() - started_at) * 1000, 2), "error_type": type(exc).__name__},
+            )
+            raise
+        response.headers["X-Request-ID"] = request_id
+        quiet_internal_request = (
+            request.url.path.endswith("/progress")
+            or (request.url.path.endswith("/claim") and response.status_code == 204)
+        )
+        quiet_dashboard_poll = request.method == "GET" and request.url.path in {
+            "/api/v1/parsing-jobs",
+            "/api/v1/documents",
+            "/api/v1/cached-pdfs",
+        }
+        log_method = (
+            logger.debug
+            if request.url.path == "/health"
+            or quiet_internal_request
+            or quiet_dashboard_poll
+            else logger.info
+        )
+        log_method(
+            "API request completed",
+            extra={
+                **details,
+                "status_code": response.status_code,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        return response
+    finally:
+        reset_request_id(request_token)
 
 
 @app.get("/health")
@@ -289,6 +462,10 @@ def cancel_parsing_job(job_id: str) -> dict[str, Any]:
     job = database.request_cancel(job_id)
     if job is None:
         raise HTTPException(404, "Job not found or no longer cancellable")
+    logger.info(
+        "Job cancellation requested",
+        extra={"action": "job_cancel", "job_id": job_id, "document_id": job["document_id"]},
+    )
     return _job_response(job)
 
 
@@ -299,7 +476,12 @@ def pause_parsing_job(job_id: str) -> dict[str, Any]:
         raise HTTPException(404, "Job not found")
     if before["status"] not in {"queued", "running"}:
         raise HTTPException(409, f"Job cannot be paused from status {before['status']}")
-    return _job_response(database.request_pause(job_id) or before)
+    job = database.request_pause(job_id) or before
+    logger.info(
+        "Job pause requested",
+        extra={"action": "job_pause", "job_id": job_id, "document_id": job["document_id"]},
+    )
+    return _job_response(job)
 
 
 @app.post("/api/v1/parsing-jobs/{job_id}/resume")
@@ -307,9 +489,14 @@ def resume_parsing_job(job_id: str) -> dict[str, Any]:
     before = database.get_job(job_id)
     if before is None:
         raise HTTPException(404, "Job not found")
-    if before["status"] != "paused":
+    if before["status"] not in {"paused", "failed"}:
         raise HTTPException(409, f"Job cannot be resumed from status {before['status']}")
-    return _job_response(database.resume_job(job_id) or before)
+    job = database.resume_job(job_id) or before
+    logger.info(
+        "Job resumed from checkpoint",
+        extra={"action": "job_resume", "job_id": job_id, "document_id": job["document_id"], "progress": job["progress"]},
+    )
+    return _job_response(job)
 
 
 @app.delete("/api/v1/parsing-jobs/{job_id}")
@@ -319,11 +506,16 @@ def delete_parsing_job(job_id: str) -> JSONResponse:
         raise HTTPException(404, "Job not found")
     if job["reader_status"] == "building":
         raise HTTPException(409, "Reader preprocessing is active; wait for it to finish before deletion")
-    found, deferred = database.request_document_delete(str(job["document_id"]))
+    _write_pdf_metadata(str(job["document_id"]), job)
+    found, deferred = database.request_job_delete(job_id)
     if not found:
         raise HTTPException(404, "Job not found")
     if not deferred:
-        _remove_document_artifacts(str(job["document_id"]))
+        _remove_document_artifacts(str(job["document_id"]), keep_pdf=True)
+    logger.info(
+        "Job deletion requested" if deferred else "Job deleted",
+        extra={"action": "job_delete", "job_id": job_id, "document_id": job["document_id"], "stage": "deferred" if deferred else "complete"},
+    )
     return JSONResponse({"deleted": not deferred, "deferred": deferred}, status_code=202 if deferred else 200)
 
 
@@ -372,10 +564,39 @@ def reprocess_cached_pdf(cache_id: str) -> dict[str, Any]:
         current = database.get_job(str(entry["job_id"])) if entry.get("job_id") else None
         if current and current["status"] in {"running", "pause_requested", "delete_requested", "cancel_requested"}:
             raise HTTPException(409, f"Document is currently {current['status']}")
-        _remove_document_artifacts(str(document_id), keep_pdf=True)
-        job = database.reset_document_job(str(document_id))
-        if job is None:
-            raise HTTPException(404, "Cached document record not found")
+        if current is not None:
+            _remove_document_artifacts(str(document_id), keep_pdf=True)
+            job = database.reset_document_job(str(document_id))
+            if job is None:
+                raise HTTPException(404, "Cached document record not found")
+            logger.info(
+                "Cached PDF reprocessing queued",
+                extra={"action": "pdf_reprocess", "job_id": job["id"], "document_id": document_id, "document_name": entry["filename"]},
+            )
+            return _job_response(job)
+
+        page_count = _inspect_pdf(source_path)
+        digest = hashlib.sha256()
+        with source_path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        job = database.create_job({
+            "id": f"job_{uuid.uuid4().hex}",
+            "batch_id": None,
+            "document_id": str(document_id),
+            "original_filename": str(entry["filename"]),
+            "source_sha256": digest.hexdigest(),
+            "source_size": source_path.stat().st_size,
+            "page_count": page_count,
+            "pages": list(range(1, page_count + 1)),
+            "strict_pages": False,
+            "idempotency_key": None,
+        })
+        _write_pdf_metadata(str(document_id), job)
+        logger.info(
+            "Cached PDF reprocessing queued",
+            extra={"action": "pdf_reprocess", "job_id": job["id"], "document_id": document_id, "document_name": entry["filename"]},
+        )
         return _job_response(job)
 
     document_id = f"doc_{uuid.uuid4().hex}"
@@ -400,6 +621,11 @@ def reprocess_cached_pdf(cache_id: str) -> dict[str, Any]:
         "strict_pages": False,
         "idempotency_key": None,
     })
+    _write_pdf_metadata(document_id, job)
+    logger.info(
+        "Cached PDF reprocessing queued",
+        extra={"action": "pdf_reprocess", "job_id": job["id"], "document_id": document_id, "document_name": entry["filename"]},
+    )
     return _job_response(job)
 
 
@@ -413,18 +639,30 @@ def delete_cached_pdf(cache_id: str) -> JSONResponse:
         job = database.get_job(str(entry["job_id"])) if entry.get("job_id") else None
         if job and job["reader_status"] == "building":
             raise HTTPException(409, "Reader preprocessing is active; wait for it to finish before deletion")
-        found, deferred = database.request_document_delete(str(document_id))
-        if found and deferred:
+        _, deferred = database.request_incomplete_document_delete(str(document_id))
+        if deferred:
+            logger.info(
+                "Cached PDF deletion waiting for active worker",
+                extra={"action": "pdf_delete", "document_id": document_id, "document_name": entry["filename"], "stage": "deferred"},
+            )
             return JSONResponse({"deleted": False, "deferred": True}, status_code=202)
-        _remove_document_artifacts(str(document_id))
-        if found:
-            database.delete_document_records(str(document_id))
+        _remove_cached_pdf(str(document_id))
+        if not database.has_completed_document(str(document_id)):
+            _remove_document_artifacts(str(document_id), keep_pdf=True)
+        logger.info(
+            "Cached PDF deleted",
+            extra={"action": "pdf_delete", "document_id": document_id, "document_name": entry["filename"], "stage": "complete"},
+        )
         return JSONResponse({"deleted": True, "deferred": False})
 
     source_path = (PDF_ROOT / str(entry["relative_path"])).resolve()
     if source_path.parent != PDF_ROOT.resolve():
         raise HTTPException(422, "Unsupported cached PDF location")
     source_path.unlink(missing_ok=True)
+    logger.info(
+        "Cached PDF deleted",
+        extra={"action": "pdf_delete", "document_name": entry["filename"], "stage": "complete"},
+    )
     return JSONResponse({"deleted": True, "deferred": False})
 
 
@@ -432,6 +670,8 @@ def delete_cached_pdf(cache_id: str) -> JSONResponse:
 def reader_manifest() -> dict[str, Any]:
     documents = []
     for job in database.list_ready_documents():
+        if not (PDF_ROOT / str(job["document_id"]) / "source.pdf").is_file():
+            continue
         manifest_path = READER_ROOT / job["document_id"] / "document.json"
         try:
             documents.append(json.loads(manifest_path.read_text(encoding="utf-8")))
@@ -450,6 +690,8 @@ def read_document(document_id: str) -> dict[str, Any]:
 
 @app.post("/api/v1/documents/{document_id}/prepare", status_code=202)
 def prepare_document(document_id: str) -> dict[str, Any]:
+    if not (PDF_ROOT / document_id / "source.pdf").is_file():
+        raise HTTPException(409, "Source PDF has been deleted; parsing result is still available")
     job = request_publish(document_id)
     if job is None:
         raise HTTPException(404, "Completed document not found")
@@ -461,8 +703,11 @@ def read_document_file(document_id: str) -> FileResponse:
     job = database.get_document(document_id, ready_only=True)
     if job is None:
         raise HTTPException(404, "Completed document not found")
+    source_path = PDF_ROOT / document_id / "source.pdf"
+    if not source_path.is_file():
+        raise HTTPException(404, "Source PDF has been deleted; parsing result is still available")
     return FileResponse(
-        PDF_ROOT / document_id / "source.pdf",
+        source_path,
         media_type="application/pdf",
         filename=job["original_filename"],
         content_disposition_type="inline",
@@ -515,6 +760,10 @@ async def query_document(request: Request) -> JSONResponse:
     try:
         result = await run_in_threadpool(handle_query, safe_payload)
     except Exception as exc:
+        logger.exception(
+            "Document query failed",
+            extra={"action": "query_failed", "document_id": document_id, "error_type": type(exc).__name__},
+        )
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     return JSONResponse({"ok": True, "result": result})
 
@@ -525,6 +774,10 @@ def worker_claim(x_internal_token: str | None = Header(None)) -> Response:
     job = database.claim_job()
     if job is None:
         return Response(status_code=204)
+    logger.info(
+        "Worker claimed parsing job",
+        extra={"action": "worker_claim", "job_id": job["id"], "document_id": job["document_id"], "document_name": job["original_filename"], "progress": job["progress"]},
+    )
     return JSONResponse(job)
 
 
@@ -544,6 +797,10 @@ async def worker_progress(
     )
     if job is None:
         raise HTTPException(404, "Job not found")
+    logger.info(
+        str(payload.get("message", "Parsing progress")),
+        extra={"action": "worker_progress", "job_id": job_id, "document_id": job["document_id"], "progress": job["progress"], "stage": job["stage"]},
+    )
     return {
         "cancel_requested": job["status"] == "cancel_requested",
         "pause_requested": job["status"] == "pause_requested",
@@ -561,11 +818,17 @@ async def worker_complete(
     payload = await request.json()
     current = database.get_job(job_id)
     if current and current["status"] == "delete_requested":
-        document_id = str(current["document_id"])
-        database.delete_document_records(document_id)
-        _remove_document_artifacts(document_id)
+        _finish_deferred_delete(current)
+        logger.info(
+            "Deferred job deletion completed",
+            extra={"action": "job_delete_completed", "job_id": job_id, "document_id": current["document_id"]},
+        )
         return {"ok": True}
     database.finish_job(job_id, status="succeeded", result_path=str(payload.get("result_path") or ""))
+    logger.info(
+        "Parsing job completed",
+        extra={"action": "worker_completed", "job_id": job_id, "document_id": current["document_id"] if current else None, "progress": 100, "stage": "parsed"},
+    )
     return {"ok": True}
 
 
@@ -579,13 +842,25 @@ async def worker_fail(
     payload = await request.json()
     current = database.get_job(job_id)
     if current and current["status"] == "delete_requested":
-        document_id = str(current["document_id"])
-        database.delete_document_records(document_id)
-        _remove_document_artifacts(document_id)
+        _finish_deferred_delete(current)
+        logger.info(
+            "Deferred job deletion completed",
+            extra={"action": "job_delete_completed", "job_id": job_id, "document_id": current["document_id"]},
+        )
         return {"ok": True}
     if payload.get("paused"):
         database.finish_pause(job_id)
+        logger.info(
+            "Parsing job paused at checkpoint",
+            extra={"action": "worker_paused", "job_id": job_id, "document_id": current["document_id"] if current else None, "progress": current["progress"] if current else None},
+        )
         return {"ok": True}
     status = "cancelled" if payload.get("cancelled") else "failed"
-    database.finish_job(job_id, status=status, error=str(payload.get("error") or status))
+    error = str(payload.get("error") or status)
+    database.finish_job(job_id, status=status, error=error)
+    log_method = logger.warning if status == "cancelled" else logger.error
+    log_method(
+        f"Parsing job {status}: {error}",
+        extra={"action": f"worker_{status}", "job_id": job_id, "document_id": current["document_id"] if current else None, "progress": current["progress"] if current else None, "stage": status},
+    )
     return {"ok": True}

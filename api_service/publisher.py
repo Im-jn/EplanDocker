@@ -5,11 +5,15 @@ import shutil
 import threading
 
 from api_service import database
+from api_service.logging_config import get_logger
 from eplan_runtime import PDF_ROOT, READER_ROOT, TEMP_ROOT
 from scripts.build_pdf_reader_data import (
     READER_SCHEMA_VERSION,
     build_document_data,
 )
+
+
+logger = get_logger("reader")
 
 
 def _reader_data_is_current(document_id: str) -> bool:
@@ -27,15 +31,25 @@ def publish_document(job: dict[str, object]) -> None:
     pdf_path = PDF_ROOT / document_id / "source.pdf"
     temporary_root = TEMP_ROOT / f"reader-{document_id}"
     final_root = READER_ROOT / document_id
+    logger.info(
+        "Reader preprocessing started",
+        extra={"action": "reader_started", "job_id": job_id, "document_id": document_id, "document_name": job["original_filename"]},
+    )
+
+    def report_progress(current: int, total: int) -> None:
+        database.update_publish_progress(job_id, current, total)
+        logger.info(
+            "Reader page prepared",
+            extra={"action": "reader_progress", "job_id": job_id, "document_id": document_id, "current": current, "total": total},
+        )
+
     try:
         if temporary_root.exists():
             shutil.rmtree(temporary_root)
         build_document_data(
             pdf_path,
             temporary_root,
-            progress_callback=lambda current, total: database.update_publish_progress(
-                job_id, current, total
-            ),
+            progress_callback=report_progress,
             document_id=document_id,
             title=str(job["original_filename"]),
             copy_pdf=False,
@@ -48,8 +62,16 @@ def publish_document(job: dict[str, object]) -> None:
         built_root.replace(final_root)
         shutil.rmtree(temporary_root, ignore_errors=True)
         database.finish_publish(job_id, ready=True)
+        logger.info(
+            "Reader preprocessing completed",
+            extra={"action": "reader_completed", "job_id": job_id, "document_id": document_id},
+        )
     except Exception as exc:
         database.finish_publish(job_id, ready=False, error=str(exc))
+        logger.exception(
+            "Reader preprocessing failed",
+            extra={"action": "reader_failed", "job_id": job_id, "document_id": document_id, "error_type": type(exc).__name__},
+        )
 
 
 def request_publish(document_id: str) -> dict[str, object] | None:

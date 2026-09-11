@@ -41,6 +41,7 @@ type Job = {
   result_available: boolean
   document_ready: boolean
   result_url: string
+  source_available: boolean
   viewer_url?: string
   created_at: string
 }
@@ -291,7 +292,7 @@ function renderJobs(jobs: Job[]): void {
       ? (job.reader_error || job.reader_message || 'Open the reader to prepare this document')
       : (job.error || job.message || '')
     const canPause = job.status === 'queued' || job.status === 'running'
-    const canResume = job.status === 'paused'
+    const canResume = job.status === 'paused' || job.status === 'failed'
     return `
     <article class="task-row">
       <div class="task-primary"><strong>${escapeHtml(job.original_filename)}</strong><span>${escapeHtml(statusLabel(job))} · ${escapeHtml(job.stage)}</span></div>
@@ -299,7 +300,7 @@ function renderJobs(jobs: Job[]): void {
       <p>${escapeHtml(message)}</p>
       <div class="task-actions">
         ${canPause ? `<button type="button" data-job-action="pause" data-job-id="${job.id}">Pause</button>` : ''}
-        ${canResume ? `<button type="button" data-job-action="resume" data-job-id="${job.id}">Continue</button>` : ''}
+        ${canResume ? `<button type="button" data-job-action="resume" data-job-id="${job.id}">${job.status === 'failed' ? 'Resume' : 'Continue'}</button>` : ''}
         ${job.result_available ? `<a href="${job.result_url}/download">Result JSON</a>` : ''}
         ${job.viewer_url ? `<a href="${job.viewer_url}">Open reader</a>` : ''}
         ${job.status === 'delete_requested'
@@ -336,17 +337,23 @@ function renderCachedPdfs(pdfs: CachedPdf[]): void {
 function renderDocuments(documents: Job[]): void {
   const readerLink = document.querySelector<HTMLAnchorElement>('#reader-link')!
   if (!documents.length) {
+    readerLink.hidden = true
     documentsRoot.innerHTML = '<p class="empty-state">Parsed documents will appear here.</p>'
     return
   }
-  readerLink.href = `/viewer/${documents[0].document_id}`
+  const readableDocument = documents.find((document) => document.source_available)
+  readerLink.hidden = !readableDocument
+  if (readableDocument) readerLink.href = `/viewer/${readableDocument.document_id}`
   documentsRoot.innerHTML = documents.map((document) => `
-    <a class="document-card" href="/viewer/${document.document_id}">
+    <div class="document-card">
       <span class="document-icon" aria-hidden="true">PDF</span>
       <strong>${escapeHtml(document.original_filename)}</strong>
-      <small>${document.document_ready ? 'Reader ready' : escapeHtml(document.reader_message || 'Open to prepare reader data')}</small>
+      <small>${document.source_available
+        ? (document.document_ready ? 'Reader ready' : escapeHtml(document.reader_message || 'Open to prepare reader data'))
+        : 'Source PDF deleted · parsed result retained'}</small>
       <div class="document-progress" role="progressbar" aria-valuenow="${document.reader_progress}" aria-valuemin="0" aria-valuemax="100"><div style="width:${document.reader_progress}%"></div></div>
-    </a>
+      <span class="document-links"><a href="${document.result_url}/download">Result JSON</a>${document.source_available ? ` <a href="/viewer/${document.document_id}">Open reader</a>` : ''}</span>
+    </div>
   `).join('')
 }
 
@@ -465,7 +472,7 @@ jobsRoot.addEventListener('click', async (event) => {
     const filename = button.dataset.filename || 'this PDF'
     const confirmed = await confirmAction(
       `Delete ${filename}?`,
-      'This permanently removes the cached PDF, every Queue entry for it, its parsing result, and its Reader data from storage.',
+      'This removes this Queue entry, its parsing result, and its Reader data. The cached PDF is kept and can be processed again later.',
       'Delete',
     )
     if (!confirmed) return
@@ -494,7 +501,7 @@ cachedPdfsRoot.addEventListener('click', async (event) => {
   if (action === 'delete') {
     const confirmed = await confirmAction(
       `Delete ${filename}?`,
-      'This permanently removes the PDF, all related Queue entries, parsing results, and Reader data from storage.',
+      'This removes the cached PDF. Completed Queue entries and parsed results are kept; unfinished tasks for this PDF will also be removed.',
       'Delete',
     )
     if (!confirmed) return

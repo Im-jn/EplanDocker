@@ -103,6 +103,27 @@ docker compose down
 
 `storage` is a host directory. Running `docker compose down` does not remove PDFs, results, job records, or caches stored there.
 
+## System Logs
+
+The API coordinator records HTTP requests, job lifecycle events, worker parsing progress, errors, and Reader preprocessing in `storage/logs/eplan-system.jsonl`. Each line is a JSON object searchable by `job_id`, `document_id`, `request_id`, `stage`, and level. Request bodies, API keys, and the internal worker token are not logged.
+
+Each log file is limited to 10 MiB by default, with five rotated files retained. Configure this in `.env`:
+
+```dotenv
+EPLAN_LOG_LEVEL=INFO
+EPLAN_LOG_MAX_BYTES=10485760
+EPLAN_LOG_BACKUP_COUNT=5
+```
+
+View or follow the latest log from PowerShell:
+
+```powershell
+Get-Content .\storage\logs\eplan-system.jsonl -Tail 100
+Get-Content .\storage\logs\eplan-system.jsonl -Wait
+```
+
+Events are also written to the container console, so `docker compose logs -f api` remains available.
+
 ## LLM Configuration
 
 The parser calls a multimodal model through the standard `/chat/completions` interface and is not tied to a specific model vendor.
@@ -178,7 +199,7 @@ curl.exe -X POST http://localhost:8000/api/v1/parsing-jobs/JOB_ID/cancel
 curl.exe -X DELETE http://localhost:8000/api/v1/parsing-jobs/JOB_ID
 ```
 
-`DELETE` removes every Queue record for the document, its cached PDF, parsing result, and Reader data. Running work is stopped cooperatively before its files are removed.
+Queue entries and cached PDFs have independent deletion semantics. Deleting a Queue entry removes only that task, its parsing result, and Reader data while keeping the source PDF. Deleting a cached PDF preserves completed Queue entries and parsing results, while unfinished related tasks are removed. Result JSON remains downloadable after source deletion, but that document can no longer be displayed in the Reader. Running work is stopped cooperatively before the corresponding deletion is finalized.
 
 ### Submit a Batch
 
@@ -203,13 +224,13 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/parsing-batches` | Upload multiple PDFs and create a batch |
 | `GET` | `/api/v1/parsing-jobs/{job_id}` | Get job status and progress |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/pause` | Pause a job while retaining its checkpoint |
-| `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | Resume a paused job |
+| `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | Resume a paused or failed job from its checkpoint |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/cancel` | Request job cancellation |
-| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | Permanently delete a job and its document data |
+| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | Delete a job and its results while keeping the cached PDF |
 | `GET` | `/api/v1/parsing-jobs/{job_id}/result` | Get the canonical parsing result |
 | `GET` | `/api/v1/cached-pdfs` | List PDFs cached in storage |
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | Reprocess a cached PDF |
-| `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | Delete a cached PDF and related data |
+| `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | Delete a cached PDF and unfinished tasks while retaining completed results |
 | `GET` | `/api/v1/documents` | List parsed documents and their reader status |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | Start reader-data preparation on demand |
 | `POST` | `/api/v1/queries` | Query a completed document |

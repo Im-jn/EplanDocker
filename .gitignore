@@ -8,6 +8,7 @@
 /storage/cache/
 /storage/state/
 /storage/tmp/
+/storage/logs/
 /.eplan_cache/
 
 # Frontend dependencies and build output

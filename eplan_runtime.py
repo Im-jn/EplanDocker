@@ -14,6 +14,7 @@ RESULT_ROOT = STORAGE_ROOT / "output" / "pdf_parsing_result"
 READER_ROOT = STORAGE_ROOT / "output" / "reader_data"
 STATE_ROOT = STORAGE_ROOT / "state"
 TEMP_ROOT = STORAGE_ROOT / "tmp"
+LOG_ROOT = STORAGE_ROOT / "logs"
 DATABASE_PATH = Path(os.getenv("EPLAN_DATABASE_PATH", STATE_ROOT / "jobs.sqlite3")).resolve()
 MAX_UPLOAD_BYTES = int(os.getenv("EPLAN_MAX_UPLOAD_BYTES", str(1024 * 1024 * 1024)))
 
@@ -55,5 +56,5 @@ INTERNAL_TOKEN = _load_or_create_internal_token()
 
 
 def ensure_storage() -> None:
-    for directory in (PDF_ROOT, RESULT_ROOT, READER_ROOT, STATE_ROOT, TEMP_ROOT):
+    for directory in (PDF_ROOT, RESULT_ROOT, READER_ROOT, STATE_ROOT, TEMP_ROOT, LOG_ROOT):
         directory.mkdir(parents=True, exist_ok=True)

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     reader_progress INTEGER NOT NULL DEFAULT 0,
     reader_message TEXT NOT NULL DEFAULT '',
     reader_error TEXT,
+    delete_pdf INTEGER NOT NULL DEFAULT 0,
     idempotency_key TEXT UNIQUE,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -75,6 +76,10 @@ def initialize() -> None:
             connection.execute(
                 "ALTER TABLE jobs ADD COLUMN reader_message TEXT NOT NULL DEFAULT ''"
             )
+        if "delete_pdf" not in columns:
+            connection.execute(
+                "ALTER TABLE jobs ADD COLUMN delete_pdf INTEGER NOT NULL DEFAULT 0"
+            )
         connection.execute("PRAGMA optimize")
 
 
@@ -99,6 +104,7 @@ def serialize_job(row: sqlite3.Row | None) -> dict[str, Any] | None:
     value = dict(row)
     value["pages"] = json.loads(value.pop("pages_json"))
     value["strict_pages"] = bool(value["strict_pages"])
+    value["delete_pdf"] = bool(value.get("delete_pdf", 0))
     value["result_available"] = value["status"] == "succeeded" and bool(value["result_path"])
     value["document_ready"] = value["status"] == "succeeded" and value["reader_status"] == "ready"
     return value
@@ -165,7 +171,7 @@ def claim_job() -> dict[str, Any] | None:
             return None
         connection.execute(
             """
-            UPDATE jobs SET status = 'running', progress = 1, stage = 'starting',
+            UPDATE jobs SET status = 'running', progress = MAX(progress, 1), stage = 'starting',
                 message = 'Worker claimed task', started_at = COALESCE(started_at, ?), updated_at = ?
             WHERE id = ? AND status = 'queued'
             """,
@@ -180,7 +186,7 @@ def update_progress(job_id: str, progress: int, stage: str, message: str) -> dic
     with connect() as connection:
         connection.execute(
             """
-            UPDATE jobs SET progress = ?, stage = ?, message = ?, updated_at = ?
+            UPDATE jobs SET progress = MAX(progress, ?), stage = ?, message = ?, updated_at = ?
             WHERE id = ? AND status IN ('running', 'pause_requested', 'cancel_requested', 'delete_requested')
             """,
             (max(0, min(int(progress), 99)), stage, message, utc_now(), job_id),
@@ -235,47 +241,103 @@ def resume_job(job_id: str) -> dict[str, Any] | None:
     with connect() as connection:
         connection.execute(
             """
-            UPDATE jobs SET status = 'queued', stage = 'queued', message = 'Waiting for a worker',
+            UPDATE jobs SET status = 'queued', stage = 'queued',
+                message = CASE
+                    WHEN status = 'failed' THEN 'Retry queued; resuming from checkpoint'
+                    ELSE 'Waiting for a worker'
+                END,
                 error = NULL, finished_at = NULL, updated_at = ?
-            WHERE id = ? AND status = 'paused'
+            WHERE id = ? AND status IN ('paused', 'failed')
             """,
             (utc_now(), job_id),
         )
     return get_job(job_id)
 
 
-def request_document_delete(document_id: str) -> tuple[bool, bool]:
-    """Return (found, deferred); running work is deleted after worker acknowledgement."""
+def request_job_delete(job_id: str, *, delete_pdf: bool = False) -> tuple[bool, bool]:
+    """Delete one queue record now, or ask its worker to stop before deletion."""
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        rows = connection.execute(
-            "SELECT id, status FROM jobs WHERE document_id = ?", (document_id,)
-        ).fetchall()
-        if not rows:
+        row = connection.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
             connection.execute("COMMIT")
             return False, False
-        deferred = any(
-            row["status"] in {"running", "pause_requested", "cancel_requested", "delete_requested"}
-            for row in rows
-        )
+        deferred = row["status"] in {
+            "running", "pause_requested", "cancel_requested", "delete_requested"
+        }
         if deferred:
             connection.execute(
                 """
                 UPDATE jobs SET status = 'delete_requested', stage = 'deleting',
-                    message = 'Waiting for worker to stop before deletion', updated_at = ?
-                WHERE document_id = ?
+                    message = 'Waiting for worker to stop before deletion',
+                    delete_pdf = ?, updated_at = ?
+                WHERE id = ?
                 """,
-                (utc_now(), document_id),
+                (int(delete_pdf), utc_now(), job_id),
             )
         else:
-            connection.execute("DELETE FROM jobs WHERE document_id = ?", (document_id,))
+            connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         connection.execute("COMMIT")
     return True, deferred
 
 
-def delete_document_records(document_id: str) -> None:
+def request_incomplete_document_delete(document_id: str) -> tuple[bool, bool]:
+    """Remove unfinished jobs for a cached PDF, deferring active worker jobs."""
     with connect() as connection:
-        connection.execute("DELETE FROM jobs WHERE document_id = ?", (document_id,))
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT id, status FROM jobs WHERE document_id = ? AND status != 'succeeded'",
+            (document_id,),
+        ).fetchall()
+        active_ids = [
+            row["id"] for row in rows
+            if row["status"] in {
+                "running", "pause_requested", "cancel_requested", "delete_requested"
+            }
+        ]
+        inactive_ids = [row["id"] for row in rows if row["id"] not in active_ids]
+        if active_ids:
+            placeholders = ",".join("?" for _ in active_ids)
+            connection.execute(
+                f"""
+                UPDATE jobs SET status = 'delete_requested', stage = 'deleting',
+                    message = 'Cached PDF deletion requested', delete_pdf = 1,
+                    updated_at = ? WHERE id IN ({placeholders})
+                """,
+                (utc_now(), *active_ids),
+            )
+        if inactive_ids:
+            placeholders = ",".join("?" for _ in inactive_ids)
+            connection.execute(
+                f"DELETE FROM jobs WHERE id IN ({placeholders})", inactive_ids
+            )
+        connection.execute("COMMIT")
+    return bool(rows), bool(active_ids)
+
+
+def delete_job_record(job_id: str) -> None:
+    with connect() as connection:
+        connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
+def has_completed_document(document_id: str) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM jobs WHERE document_id = ? AND status = 'succeeded' LIMIT 1",
+            (document_id,),
+        ).fetchone()
+    return row is not None
+
+
+def has_incomplete_document(document_id: str) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM jobs WHERE document_id = ? AND status != 'succeeded' LIMIT 1",
+            (document_id,),
+        ).fetchone()
+    return row is not None
 
 
 def reset_document_job(document_id: str, pages: list[int] | None = None) -> dict[str, Any] | None:
@@ -293,7 +355,7 @@ def reset_document_job(document_id: str, pages: list[int] | None = None) -> dict
                 message = 'Waiting for a worker', error = NULL, result_path = NULL,
                 pages_json = ?, reader_status = 'pending', reader_progress = 0,
                 reader_message = '', reader_error = NULL, started_at = NULL,
-                finished_at = NULL, updated_at = ? WHERE id = ?
+                finished_at = NULL, delete_pdf = 0, updated_at = ? WHERE id = ?
             """,
             (json.dumps(selected_pages), utc_now(), row["id"]),
         )
@@ -302,7 +364,6 @@ def reset_document_job(document_id: str, pages: list[int] | None = None) -> dict
 
 def finish_job(job_id: str, *, status: str, result_path: str | None = None, error: str | None = None) -> None:
     now = utc_now()
-    progress = 100 if status == "succeeded" else 0
     stage = "parsed" if status == "succeeded" else status
     message = "Parsing result is ready" if status == "succeeded" else (error or status)
     reader_status = "pending" if status == "succeeded" else "skipped"
@@ -310,6 +371,16 @@ def finish_job(job_id: str, *, status: str, result_path: str | None = None, erro
         "Open the document to prepare reader data" if status == "succeeded" else ""
     )
     with connect() as connection:
+        current = connection.execute(
+            "SELECT progress FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        progress = (
+            100
+            if status == "succeeded"
+            else int(current["progress"])
+            if status == "failed" and current is not None
+            else 0
+        )
         connection.execute(
             """
             UPDATE jobs SET status = ?, progress = ?, stage = ?, message = ?, error = ?,

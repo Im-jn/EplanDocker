@@ -102,6 +102,27 @@ docker compose down
 
 `storage` 是宿主机目录，执行 `docker compose down` 不会删除其中的 PDF、结果、任务记录或缓存。
 
+## 系统日志
+
+API 中枢会把 HTTP 请求、任务生命周期、worker 解析进度、错误和 Reader 预处理过程记录到 `storage/logs/eplan-system.jsonl`。日志采用每行一个 JSON 对象的格式，可按 `job_id`、`document_id`、`request_id`、`stage` 和日志级别检索；请求正文、API Key 和内部 token 不会写入日志。
+
+默认单个日志文件最大 10 MiB，保留 5 个历史文件。可在 `.env` 中调整：
+
+```dotenv
+EPLAN_LOG_LEVEL=INFO
+EPLAN_LOG_MAX_BYTES=10485760
+EPLAN_LOG_BACKUP_COUNT=5
+```
+
+PowerShell 中查看最新日志：
+
+```powershell
+Get-Content .\storage\logs\eplan-system.jsonl -Tail 100
+Get-Content .\storage\logs\eplan-system.jsonl -Wait
+```
+
+日志同时输出到容器控制台，因此也可以运行 `docker compose logs -f api`。
+
 ## 大模型配置
 
 解析器通过标准的 `/chat/completions` 接口调用多模态模型，不绑定特定模型厂商。
@@ -177,7 +198,7 @@ curl.exe -X POST http://localhost:8000/api/v1/parsing-jobs/JOB_ID/cancel
 curl.exe -X DELETE http://localhost:8000/api/v1/parsing-jobs/JOB_ID
 ```
 
-`DELETE` 会删除该文档的所有 Queue 记录、缓存 PDF、parsing result 和 Reader data；运行中的任务会先安全停止，再完成删除。
+Queue 和缓存 PDF 使用独立的删除语义：删除 Queue 项只删除该任务、parsing result 和 Reader data，并保留原 PDF；删除缓存 PDF 会保留已完成的 Queue 项及 parsing result，同时删除尚未完成的相关任务。源 PDF 删除后 Result JSON 仍可下载，但该文档将无法在 Reader 中显示。运行中的任务会先安全停止，再完成对应删除。
 
 ### 提交批量任务
 
@@ -202,13 +223,13 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/parsing-batches` | 上传多个 PDF 并创建批次 |
 | `GET` | `/api/v1/parsing-jobs/{job_id}` | 查询任务和进度 |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/pause` | 暂停任务并保留 checkpoint |
-| `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | 继续暂停的任务 |
+| `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | 继续暂停或失败的任务（复用 checkpoint） |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/cancel` | 请求取消任务 |
-| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | 永久删除任务及关联文档数据 |
+| `DELETE` | `/api/v1/parsing-jobs/{job_id}` | 删除任务及其结果，保留缓存 PDF |
 | `GET` | `/api/v1/parsing-jobs/{job_id}/result` | 获取规范 parsing result |
 | `GET` | `/api/v1/cached-pdfs` | 列出 storage 中缓存的 PDF |
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | 重新处理缓存 PDF |
-| `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 及关联数据 |
+| `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 和未完成任务，保留已完成任务及结果 |
 | `GET` | `/api/v1/documents` | 列出已解析文档及其 reader 状态 |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | 按需启动 reader-data 预处理 |
 | `POST` | `/api/v1/queries` | 查询已完成文档 |
