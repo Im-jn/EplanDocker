@@ -293,6 +293,7 @@ function renderJobs(jobs: Job[]): void {
       : (job.error || job.message || '')
     const canPause = job.status === 'queued' || job.status === 'running'
     const canResume = job.status === 'paused' || job.status === 'failed'
+    const isPausing = job.status === 'pause_requested'
     return `
     <article class="task-row">
       <div class="task-primary"><strong>${escapeHtml(job.original_filename)}</strong><span>${escapeHtml(statusLabel(job))} · ${escapeHtml(job.stage)}</span></div>
@@ -301,6 +302,7 @@ function renderJobs(jobs: Job[]): void {
       <div class="task-actions">
         ${canPause ? `<button type="button" data-job-action="pause" data-job-id="${job.id}">Pause</button>` : ''}
         ${canResume ? `<button type="button" data-job-action="resume" data-job-id="${job.id}">${job.status === 'failed' ? 'Resume' : 'Continue'}</button>` : ''}
+        ${isPausing ? '<span class="pause-pending" role="status" aria-live="polite"><span class="pause-spinner" aria-hidden="true"></span>Pausing&hellip;</span>' : ''}
         ${job.result_available ? `<a href="${job.result_url}/download">Result JSON</a>` : ''}
         ${job.viewer_url ? `<a href="${job.viewer_url}">Open reader</a>` : ''}
         ${job.status === 'delete_requested'

@@ -80,6 +80,10 @@ nav { display: flex; gap: 8px; }
 .task-actions button.is-danger:hover, .cache-actions button.is-danger:hover { background: #faefee; }
 .task-actions button:disabled, .cache-actions button:disabled { cursor: wait; opacity: .5; }
 .action-pending { color: #9d6b38; font-size: .8rem; }
+.pause-pending { display: inline-flex; align-items: center; gap: 7px; color: #526a5e; font-size: .8rem; font-weight: 600; }
+.pause-spinner { width: 14px; height: 14px; border: 2px solid #bdc9c2; border-top-color: #315e49; border-radius: 50%; animation: pause-spin .75s linear infinite; }
+@keyframes pause-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pause-spinner { animation-duration: 1.5s; } }
 .cache-list { display: grid; }
 .cache-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid #dfe2df; }
 .cache-row:first-child { border-top: 0; }
