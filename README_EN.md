@@ -265,6 +265,11 @@ Every component carries a `subclass`: the type of its only element (such as `sym
 - `start` is a global id or `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`; `file` may omit `.pdf`.
 - Reaching a kind listed in `skip` (`endpoint`, `net`, `group`, `wire`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers are edges between components, so crossing one costs a hop.
 - Each node is reached once, so loops are never expanded twice.
+- `direction` defaults to `any` (no direction). With `downstream` or `upstream`, every hop heads toward the page's arrow components whose `page_io` is `output` or `input`:
+  - a node that can reach such arrows only follows the shortest paths toward them;
+  - a node that cannot (including every node of an end page without such arrows) may hop to its neighbours;
+  - only arrows of that direction cross to another page through transfers, opposite arrows never do;
+  - the result contains only the nodes and edges actually walked.
 - `open_endpoints` lists endpoints with one traced and one untraced side, i.e. where the trace stopped.
 
 ## Import an Existing Parsing Result

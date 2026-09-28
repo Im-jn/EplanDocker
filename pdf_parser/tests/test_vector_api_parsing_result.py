@@ -213,4 +213,5 @@ def test_document_trace_index_keeps_one_transfer_record_for_bidirectional_client
         assert result["pages"][0]["nets"] == [{"id": 7, "type": "net", "page": 1}]
         assert result["pages"][0]["relations"] == [
             {"type": "contains", "source": "net:7", "target": "wire:2"},
+            {"type": "contains", "source": "group:3", "target": "component:4"},
         ]

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS nodes_page ON nodes (filename, page, kind);
 CREATE INDEX IF NOT EXISTS edges_source ON edges (source_id, kind);
 CREATE INDEX IF NOT EXISTS edges_target ON edges (target_id, kind);
+CREATE INDEX IF NOT EXISTS edges_page ON edges (filename, source_page, kind);
 """
 
 

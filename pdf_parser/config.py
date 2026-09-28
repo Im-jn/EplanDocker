@@ -46,6 +46,14 @@ class DiagramConfig:
     wire_terminal_diagonal_max_length_pt: float = 10.0
     arrow_removal_boundary_tolerance_pt: float = 0.1
     arrow_flow_min_cosine: float = 0.5
+    # Fallback for drawing mistakes: a dashed box that frames several complete,
+    # labelled devices is treated as a group instead of one component. A box
+    # must meet all three thresholds, so ordinary dashed devices are untouched.
+    container_min_area_ratio: float = 0.2
+    container_min_device_tags: int = 10
+    container_min_labelled_elements: int = 3
+    container_tag_element_distance_pt: float = 10.0
+    device_tag_pattern: str = r"^\s*(?:\d+\s+)?-[A-Za-z]"
 
 
 @dataclass(frozen=True)

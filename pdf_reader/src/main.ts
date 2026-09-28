@@ -853,6 +853,22 @@ app.innerHTML = `
               <select id="info-trace-id" class="select" disabled>
                 <option value="">Select an ID</option>
               </select>
+              <label class="field-label" for="info-trace-direction">Direction</label>
+              <select id="info-trace-direction" class="select" title="Automatically select the nodes of each hop that head upstream or downstream">
+                <option value="any">Any</option>
+                <option value="downstream">Downstream</option>
+                <option value="upstream">Upstream</option>
+              </select>
+              <span class="field-label">Skip</span>
+              <details class="info-trace-skip">
+                <summary id="info-trace-skip-summary">Endpoint, Net, Group</summary>
+                <div class="info-trace-skip-options" role="group" aria-label="Kinds passed through without counting a hop">
+                  <label><input type="checkbox" value="endpoint" checked />Endpoint</label>
+                  <label><input type="checkbox" value="net" checked />Net</label>
+                  <label><input type="checkbox" value="group" checked />Group</label>
+                  <label><input type="checkbox" value="wire" />Wire</label>
+                </div>
+              </details>
               <span></span>
               <div class="info-trace-choose-actions">
                 <button id="info-trace-choose" class="button" type="button" disabled>Choose</button>
@@ -1099,6 +1115,11 @@ const extractJsonSearchButton = mustQuery<HTMLButtonElement>('#extract-json-sear
 const extractJsonSearchStatus = mustQuery<HTMLSpanElement>('#extract-json-search-status')
 const infoTracePageInput = mustQuery<HTMLInputElement>('#info-trace-page')
 const infoTraceKindSelect = mustQuery<HTMLSelectElement>('#info-trace-kind')
+const infoTraceDirectionSelect = mustQuery<HTMLSelectElement>('#info-trace-direction')
+const infoTraceSkipSummary = mustQuery<HTMLElement>('#info-trace-skip-summary')
+const infoTraceSkipInputs = [
+  ...document.querySelectorAll<HTMLInputElement>('.info-trace-skip input[type="checkbox"]'),
+]
 const infoTraceIdSelect = mustQuery<HTMLSelectElement>('#info-trace-id')
 const infoTraceChooseBtn = mustQuery<HTMLButtonElement>('#info-trace-choose')
 const infoTraceStopBtn = mustQuery<HTMLButtonElement>('#info-trace-stop')
@@ -1297,11 +1318,20 @@ type ExtractedHyperlink = {
   target_component?: number | string
 }
 
-type InfoTraceKind = 'component' | 'wire'
+type InfoTraceKind = 'component' | 'wire' | 'endpoint' | 'net' | 'group'
+
+type InfoTraceDirection = 'any' | 'upstream' | 'downstream'
+
+type InfoTracePageStream = {
+  arrows: { input: string[]; output: string[] }
+  distances: Record<string, Record<string, number>>
+}
 
 type InfoTraceEntity = {
   id: number | string
   type?: string
+  subclass?: string | null
+  page_io?: string
   page?: number
   bbox: Partial<BBox> | null
   title?: string[]
@@ -1314,6 +1344,7 @@ type InfoTracePageIndex = {
   wires: InfoTraceEntity[]
   endpoints: InfoTraceEntity[]
   nets?: InfoTraceEntity[]
+  groups?: InfoTraceEntity[]
   relations: ExtractedRelation[]
 }
 
@@ -1328,6 +1359,8 @@ type InfoTraceNode = {
   page: number
   kind: InfoTraceKind
   id: number | string
+  subclass?: string | null
+  pageIo?: string
   bbox: Partial<BBox> | null
   title: string[]
   descriptions: string[]
@@ -1339,6 +1372,8 @@ type InfoTraceStep = {
   endpoints: Array<{ page: number; id: number | string }>
   nets: Array<{ page: number; id: number | string }>
   selectedNodeKeys: string[]
+  // Keys of the previous hop's nodes that reached each node of this hop.
+  origins?: Record<string, string[]>
 }
 
 type InfoTraceOpenEndpoint = {
@@ -1434,6 +1469,9 @@ let pendingHyperlinkNavigation: LinkItem | null = null
 let infoTraceIndexData: InfoTraceIndex | null = null
 let infoTraceIndexDocumentId: string | null = null
 let infoTraceIndexPromise: Promise<InfoTraceIndex | null> | null = null
+let infoTraceAdjacencyCache: { index: InfoTraceIndex; adjacency: Map<string, string[]> } | null = null
+// Per document and page, fetched once: each node's distance to the page's arrows.
+const infoTracePageStreams = new Map<string, Promise<InfoTracePageStream | null>>()
 let infoTraceAllSteps: InfoTraceStep[] = []
 let infoTraceOpenEndpoints: InfoTraceOpenEndpoint[] = []
 let infoTraceResolvedEndpoints: Array<{ page: number; id: number | string }> = []
@@ -4710,6 +4748,8 @@ async function selectDocument(documentId: string): Promise<void> {
   infoTraceIndexData = null
   infoTraceIndexDocumentId = null
   infoTraceIndexPromise = null
+  infoTraceAdjacencyCache = null
+  infoTracePageStreams.clear()
   infoTraceAllSteps = []
   infoTraceOpenEndpoints = []
   infoTraceResolvedEndpoints = []
@@ -5125,6 +5165,8 @@ function infoTraceEntityNode(
     page: pageNumber,
     kind,
     id: entity.id,
+    subclass: entity.subclass ?? null,
+    pageIo: entity.page_io,
     bbox: entity.bbox ?? null,
     title: stringList(entity.title),
     descriptions: stringList(entity.descriptions),
@@ -5137,7 +5179,13 @@ function findInfoTraceNode(
   id: number | string,
 ): InfoTraceNode | null {
   const page = infoTracePage(pageNumber)
-  const collection = kind === 'component' ? page?.components : page?.wires
+  const collection = page ? {
+    component: page.components,
+    wire: page.wires,
+    endpoint: page.endpoints,
+    net: page.nets ?? [],
+    group: page.groups ?? [],
+  }[kind] : undefined
   const entity = collection?.find((candidate) => String(candidate.id) === String(id))
   return entity ? infoTraceEntityNode(pageNumber, kind, entity) : null
 }
@@ -5206,114 +5254,85 @@ function refreshInfoTraceEndpointState(): void {
   infoTraceResolvedEndpoints = state.resolved
 }
 
-function infoTraceNetExpansion(
-  sourceKeys: Set<string>,
-  tracedKeys: Set<string>,
-): {
-  nodes: InfoTraceNode[]
-  nets: Array<{ page: number; id: number | string }>
-} {
-  const nodes = new Map<string, InfoTraceNode>()
-  const nets = new Map<string, { page: number; id: number | string }>()
-  for (const page of infoTraceIndexData?.pages ?? []) {
-    const netWires = new Map<string, Set<string>>()
+function infoTraceNodeRef(key: string): { page: number; kind: InfoTraceKind; id: string } | null {
+  const match = /^(\d+):(component|wire|endpoint|net|group):(.*)$/.exec(key)
+  return match ? { page: Number(match[1]), kind: match[2] as InfoTraceKind, id: match[3] } : null
+}
+
+function infoTraceAdjacency(): Map<string, string[]> {
+  const index = infoTraceIndexData
+  if (!index) return new Map()
+  if (infoTraceAdjacencyCache?.index === index) return infoTraceAdjacencyCache.adjacency
+  const adjacency = new Map<string, string[]>()
+  const link = (left: string, right: string): void => {
+    if (left === right) return
+    const leftNeighbors = adjacency.get(left) ?? []
+    leftNeighbors.push(right)
+    adjacency.set(left, leftNeighbors)
+    const rightNeighbors = adjacency.get(right) ?? []
+    rightNeighbors.push(left)
+    adjacency.set(right, rightNeighbors)
+  }
+  for (const page of index.pages) {
     for (const relation of page.relations) {
-      if (relation.type !== 'contains') continue
-      const source = String(relation.source ?? '')
-      const target = String(relation.target ?? '')
-      if (!source.startsWith('net:') || !target.startsWith('wire:')) continue
-      const wireRefs = netWires.get(source) ?? new Set<string>()
-      wireRefs.add(target)
-      netWires.set(source, wireRefs)
-    }
-    for (const [netRef, wireRefs] of netWires) {
-      const containsSelectedWire = [...wireRefs].some((wireRef) => (
-        sourceKeys.has(`${page.page_number}:${wireRef}`)
-      ))
-      if (!containsSelectedWire) continue
-      let expanded = false
-      for (const wireRef of wireRefs) {
-        const node = findInfoTraceNode(page.page_number, 'wire', wireRef.slice('wire:'.length))
-        if (!node || tracedKeys.has(infoTraceNodeKey(node))) continue
-        nodes.set(infoTraceNodeKey(node), node)
-        expanded = true
-      }
-      if (expanded) {
-        const net = { page: page.page_number, id: netRef.slice('net:'.length) }
-        nets.set(`${net.page}:${String(net.id)}`, net)
-      }
+      if (relation.type !== 'connection' && relation.type !== 'contains') continue
+      link(`${page.page_number}:${String(relation.source)}`, `${page.page_number}:${String(relation.target)}`)
     }
   }
-  return { nodes: [...nodes.values()], nets: [...nets.values()] }
-}
-
-function infoTraceTransferExpansion(
-  sourceKeys: Set<string>,
-  tracedKeys: Set<string>,
-): InfoTraceNode[] {
-  const nodes = new Map<string, InfoTraceNode>()
-  for (const transfer of infoTraceIndexData?.transfers ?? []) {
-    const source = transfer.source_component === null
-      ? null
-      : findInfoTraceNode(transfer.source_page, 'component', transfer.source_component)
-    const target = transfer.target_component === undefined
-      ? null
-      : findInfoTraceNode(transfer.target_page, 'component', transfer.target_component)
-    if (!source || !target) continue
-    const sourceSelected = sourceKeys.has(infoTraceNodeKey(source))
-    const targetSelected = sourceKeys.has(infoTraceNodeKey(target))
-    const sourceVisited = tracedKeys.has(infoTraceNodeKey(source))
-    const targetVisited = tracedKeys.has(infoTraceNodeKey(target))
-    if (sourceSelected && !targetVisited) nodes.set(infoTraceNodeKey(target), target)
-    if (targetSelected && !sourceVisited) nodes.set(infoTraceNodeKey(source), source)
+  for (const transfer of index.transfers) {
+    if (transfer.source_component === null || transfer.target_component === undefined) continue
+    link(
+      `${transfer.source_page}:component:${String(transfer.source_component)}`,
+      `${transfer.target_page}:component:${String(transfer.target_component)}`,
+    )
   }
-  return [...nodes.values()]
+  infoTraceAdjacencyCache = { index, adjacency }
+  return adjacency
 }
 
+function infoTraceSkippedKinds(): Set<InfoTraceKind> {
+  return new Set(
+    infoTraceSkipInputs.filter((input) => input.checked).map((input) => input.value as InfoTraceKind),
+  )
+}
+
+// One hop follows the server trace's skip model: pass freely through skipped
+// kinds and stop at the first nodes of any other kind, which form the hop.
+// Components are never skipped.
 function nextInfoTraceStep(): InfoTraceStep | null {
   const currentStep = infoTraceAllSteps.at(-1)
   if (!currentStep) return null
   const currentNodeKeys = new Set(currentStep.nodes.map(infoTraceNodeKey))
-  const sourceKeys = new Set(
-    currentStep.selectedNodeKeys.filter((key) => currentNodeKeys.has(key)),
-  )
-  if (sourceKeys.size === 0) return null
+  const sourceKeys = currentStep.selectedNodeKeys.filter((key) => currentNodeKeys.has(key))
+  if (sourceKeys.length === 0) return null
   const tracedKeys = tracedInfoTraceNodeKeys()
   const endpointState = computeInfoTraceEndpointState(tracedKeys)
-  const netExpansion = infoTraceNetExpansion(sourceKeys, tracedKeys)
+  const skipped = infoTraceSkippedKinds()
+  const adjacency = infoTraceAdjacency()
   const nodes = new Map<string, InfoTraceNode>()
   const nets = new Map<string, { page: number; id: number | string }>()
-  for (const net of netExpansion.nets) nets.set(`${net.page}:${String(net.id)}`, net)
-  if (netExpansion.nodes.length > 0) {
-    for (const node of netExpansion.nodes) nodes.set(infoTraceNodeKey(node), node)
-  } else {
-    const componentConnectedWireKeys = new Set<string>()
-    for (const endpoint of endpointState.open) {
-      const selectedSources = endpoint.sources
-        .filter((node) => sourceKeys.has(infoTraceNodeKey(node)))
-      if (selectedSources.length === 0) continue
-      const expandsFromComponent = selectedSources.some((node) => node.kind === 'component')
-      for (const node of endpoint.candidates) {
-        nodes.set(infoTraceNodeKey(node), node)
-        if (expandsFromComponent && node.kind === 'wire') {
-          componentConnectedWireKeys.add(infoTraceNodeKey(node))
+  const origins: Record<string, string[]> = {}
+  for (const sourceKey of sourceKeys) {
+    const visited = new Set([sourceKey])
+    const queue = [sourceKey]
+    while (queue.length > 0) {
+      const key = queue.shift()!
+      for (const neighbor of adjacency.get(key) ?? []) {
+        if (visited.has(neighbor)) continue
+        visited.add(neighbor)
+        const ref = infoTraceNodeRef(neighbor)
+        if (!ref) continue
+        if (skipped.has(ref.kind)) {
+          if (ref.kind === 'net') nets.set(`${ref.page}:${ref.id}`, { page: ref.page, id: ref.id })
+          queue.push(neighbor)
+          continue
         }
+        if (tracedKeys.has(neighbor)) continue
+        const node = findInfoTraceNode(ref.page, ref.kind, ref.id)
+        if (!node) continue
+        nodes.set(neighbor, node)
+        ;(origins[neighbor] ??= []).push(sourceKey)
       }
-    }
-    if (componentConnectedWireKeys.size > 0) {
-      const connectedNetExpansion = infoTraceNetExpansion(
-        componentConnectedWireKeys,
-        tracedKeys,
-      )
-      for (const node of connectedNetExpansion.nodes) {
-        nodes.set(infoTraceNodeKey(node), node)
-      }
-      for (const net of connectedNetExpansion.nets) {
-        nets.set(`${net.page}:${String(net.id)}`, net)
-      }
-    }
-    for (const node of infoTraceTransferExpansion(sourceKeys, tracedKeys)) {
-      nodes.set(infoTraceNodeKey(node), node)
     }
   }
   // A hop may only contain nodes that have not appeared in any earlier hop.
@@ -5337,7 +5356,102 @@ function nextInfoTraceStep(): InfoTraceStep | null {
     endpoints: newlyResolved,
     nets: [...nets.values()],
     selectedNodeKeys: [],
+    origins,
   }
+}
+
+function loadInfoTracePageStream(page: number): Promise<InfoTracePageStream | null> {
+  const documentData = activeDocument
+  if (!documentData) return Promise.resolve(null)
+  const key = `${documentData.id}:${page}`
+  let cached = infoTracePageStreams.get(key)
+  if (!cached) {
+    const query = `file=${encodeURIComponent(documentData.title)}&page=${page}`
+    cached = fetch(`/api/v1/page-stream?${query}`)
+      .then(async (response) => (response.ok ? await response.json() as InfoTracePageStream : null))
+      .catch(() => null)
+      .then((stream) => {
+        if (!stream) infoTracePageStreams.delete(key)
+        return stream
+      })
+    infoTracePageStreams.set(key, cached)
+  }
+  return cached
+}
+
+function infoTraceIsArrow(node: InfoTraceNode, pageIo?: string): boolean {
+  return node.kind === 'component'
+    && node.subclass === 'arrow'
+    && (pageIo === undefined || node.pageIo === pageIo)
+}
+
+// Mirrors the server's directional hop: on a page, a node heads the right way
+// when it is closer than its source to one of the page's target arrows; a
+// source that reaches no target arrow may go to any neighbour; only target
+// arrows continue across pages, and opposite arrows never do.
+function infoTraceHeadsInDirection(
+  node: InfoTraceNode,
+  source: InfoTraceNode,
+  streams: Map<number, InfoTracePageStream>,
+  targetIo: 'input' | 'output',
+): boolean {
+  if (source.page !== node.page) return infoTraceIsArrow(source, targetIo)
+  if (infoTraceIsArrow(source, targetIo)) return false
+  const stream = streams.get(node.page)
+  if (!stream) return false
+  const sourceRef = `${source.kind}:${String(source.id)}`
+  const nodeRef = `${node.kind}:${String(node.id)}`
+  const reachable = stream.arrows[targetIo].filter((arrow) => (
+    arrow !== sourceRef && stream.distances[arrow]?.[sourceRef] !== undefined
+  ))
+  if (reachable.length === 0) return true
+  return reachable.some((arrow) => {
+    const distances = stream.distances[arrow]
+    const nodeDistance = distances[nodeRef]
+    return nodeDistance !== undefined
+      && nodeDistance < distances[sourceRef]
+      && (!infoTraceIsArrow(node) || nodeRef === arrow)
+  })
+}
+
+async function applyInfoTraceDirection(): Promise<void> {
+  const direction = infoTraceDirectionSelect.value as InfoTraceDirection
+  const step = infoTraceAllSteps.at(-1)
+  if (!step || direction === 'any') return
+  if (step.depth === 0) {
+    step.selectedNodeKeys = step.nodes.map(infoTraceNodeKey)
+    renderInfoTraceSteps()
+    return
+  }
+  const previous = infoTraceAllSteps[infoTraceAllSteps.length - 2]
+  const sources = new Map(previous.nodes.map((node) => [infoTraceNodeKey(node), node]))
+  const pages = [...new Set([...previous.nodes, ...step.nodes].map((node) => node.page))]
+  infoTraceStatus.textContent = `Selecting ${direction} nodes…`
+  const loaded = await Promise.all(pages.map(async (page) => [page, await loadInfoTracePageStream(page)] as const))
+  if (infoTraceAllSteps.at(-1) !== step || infoTraceDirectionSelect.value !== direction) return
+  const streams = new Map<number, InfoTracePageStream>()
+  const missingPages: number[] = []
+  for (const [page, stream] of loaded) {
+    if (stream) streams.set(page, stream)
+    else missingPages.push(page)
+  }
+  const targetIo = direction === 'downstream' ? 'output' : 'input'
+  step.selectedNodeKeys = step.nodes
+    .filter((node) => (step.origins?.[infoTraceNodeKey(node)] ?? []).some((originKey) => {
+      const source = sources.get(originKey)
+      return source !== undefined && infoTraceHeadsInDirection(node, source, streams, targetIo)
+    }))
+    .map(infoTraceNodeKey)
+  renderInfoTraceSteps()
+  infoTraceStatus.textContent = `${step.selectedNodeKeys.length} of ${step.nodes.length} nodes head ${direction} and are selected for the next hop.`
+    + (missingPages.length > 0 ? ` No direction data for page${missingPages.length === 1 ? '' : 's'} ${missingPages.join(', ')}.` : '')
+}
+
+function updateInfoTraceSkipSummary(): void {
+  const labels = infoTraceSkipInputs
+    .filter((input) => input.checked)
+    .map((input) => input.parentElement?.textContent?.trim() ?? input.value)
+  infoTraceSkipSummary.textContent = labels.length > 0 ? labels.join(', ') : 'None'
 }
 
 function renderInfoTraceHighlights(scrollToFirst = false): void {
@@ -5354,7 +5468,8 @@ function renderInfoTraceHighlights(scrollToFirst = false): void {
     for (const node of step.nodes) {
       if (node.page !== state.pageNumber) continue
       if (node.kind === 'component') componentIds.add(String(node.id))
-      else wireIds.add(String(node.id))
+      else if (node.kind === 'wire') wireIds.add(String(node.id))
+      else if (node.kind === 'endpoint') endpointIds.add(String(node.id))
     }
   }
   for (const endpointRef of infoTraceResolvedEndpoints) {
@@ -5516,6 +5631,7 @@ async function chooseInfoTraceRoot(): Promise<void> {
     ? `Tracing from page ${root.page} ${root.kind} ${String(root.id)} with ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'}.`
     : 'Select a target ID to begin tracing.'
   if (!root) return
+  void applyInfoTraceDirection()
   infoTraceStopBtn.disabled = false
   clearExtractVectorHighlights()
   if (activePageNumber !== root.page) await selectPage(root.page)
@@ -5668,7 +5784,14 @@ infoTraceForwardBtn.addEventListener('click', () => {
   infoTraceAllSteps.push(next)
   renderInfoTraceSteps()
   infoTraceStatus.textContent = `Added hop ${next.depth}. ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'} remain.`
+  void applyInfoTraceDirection()
 })
+infoTraceDirectionSelect.addEventListener('change', () => {
+  void applyInfoTraceDirection()
+})
+for (const input of infoTraceSkipInputs) {
+  input.addEventListener('change', updateInfoTraceSkipSummary)
+}
 infoTraceBackBtn.addEventListener('click', () => {
   if (infoTraceAllSteps.length <= 1) return
   infoTraceAllSteps.pop()

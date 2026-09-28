@@ -5,22 +5,28 @@ Arriving at a skipped kind (``endpoint``/``net``/``group``/``wire``) is free, so
 the trace keeps expanding through it until it reaches counted nodes, and the hop
 ends there. Transfers are edges between components and therefore cost one hop.
 Every node is reached at most once, which keeps loops from being re-expanded.
+
+With ``direction`` set to ``upstream`` or ``downstream``, every hop also has to
+head toward the page's input or output arrows; see :class:`_DirectedTracer`.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Literal
 
+from pdf_parser.page_stream import ARROW_IO, PageGraph
 from pdf_parser.parsed_graph import connect_parsed_graph
 from pdf_parser.parsed_json import global_id, id_kind, id_local_part
 
 
 ResponseFormat = Literal["subgraph", "hops"]
+TraceDirection = Literal["any", "upstream", "downstream"]
 SKIPPABLE_KINDS = frozenset({"endpoint", "net", "group", "wire"})
 DEFAULT_SKIP = ("endpoint", "net", "group")
 NODE_KINDS = ("component", "wire", "endpoint", "net", "group")
@@ -46,14 +52,18 @@ def trace_document(
     start_local_id: int | str | None = None,
     max_hops: int,
     skip: Iterable[str] = DEFAULT_SKIP,
+    direction: TraceDirection = "any",
     response_format: ResponseFormat = "subgraph",
 ) -> dict[str, Any]:
     """Trace from a global node id, or from the uploaded PDF ``file`` name with
     ``start_page``/``start_kind``/``start_local_id``.
 
     Callers only need the filename they submitted, never an internal document id.
+    ``direction`` other than ``any`` keeps every hop heading up- or downstream.
     """
     skipped = frozenset(skip)
+    if direction not in {"any", *ARROW_IO}:
+        raise ValueError("direction must be any, upstream or downstream")
     if max_hops < 0:
         raise ValueError("max_hops must be non-negative")
     if not skipped <= SKIPPABLE_KINDS:
@@ -76,11 +86,19 @@ def trace_document(
         filename = str(row[0])
 
         tracer = _GraphTracer(connection, skipped)
-        dist = tracer.expand(start_id, max_hops)
-        selected = tracer.select_output(start_id, dist)
+        if direction == "any":
+            dist = tracer.expand(start_id, max_hops)
+            selected = tracer.select_output(start_id, dist)
+            edge_records = tracer.induced_edges(selected, dist)
+        else:
+            directed = _DirectedTracer(connection, skipped, ARROW_IO[direction])
+            dist, selected, edge_ids = directed.expand(start_id, max_hops)
+            edge_records = [
+                (edge, max(dist[edge["source"]], dist[edge["target"]]))
+                for edge in (directed.edges[edge_id] for edge_id in _sorted_ids(edge_ids))
+            ]
         open_endpoints = tracer.open_endpoints(selected)
         node_records = tracer.node_records(selected, dist)
-        edge_records = tracer.induced_edges(selected, dist)
 
     base = {
         "file": filename,
@@ -91,7 +109,7 @@ def trace_document(
         },
         "max_hops": max_hops,
         "skip": sorted(skipped),
-        "direction": "any",
+        "direction": direction,
         "response_format": response_format,
         "reached_hops": max(dist[node] for node in selected),
         "open_endpoints": open_endpoints,
@@ -184,6 +202,7 @@ class _GraphTracer:
 
     def open_endpoints(self, selected: set[str]) -> list[dict[str, Any]]:
         """Return endpoints joining traced nodes to nodes the trace did not reach."""
+        self.fetch(selected)
         endpoints = {node for node in selected if id_kind(node) == "endpoint"}
         endpoints.update(
             neighbor
@@ -282,6 +301,152 @@ class _GraphTracer:
                     self.adjacency[source].append((edge_id, target))
                 if target in members:
                     self.adjacency[target].append((edge_id, source))
+
+
+class _DirectedTracer:
+    """Hop expansion that keeps heading toward arrows whose ``page_io`` is ``target_io``.
+
+    From a node that can reach such arrows on its page, a hop only follows the
+    shortest paths toward them: each step must bring one of those arrows one edge
+    closer (see :class:`PageGraph`). From a node that reaches none of them,
+    including every node of a page without such arrows, a hop may go to any
+    in-page neighbour. Only those target arrows cross to another page, through
+    their transfers; arrows of the opposite direction never do.
+    """
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        skipped: frozenset[str],
+        target_io: str,
+    ) -> None:
+        self.connection = connection
+        self.skipped = skipped
+        self.target_io = target_io
+        self.page_of: dict[str, PageGraph] = {}
+        self.edges: dict[str, dict[str, Any]] = {}
+
+    def expand(self, start: str, max_hops: int) -> tuple[dict[str, int], set[str], set[str]]:
+        """Return hop counts, traversed nodes and traversed edge ids."""
+        dist = {start: 0}
+        nodes = {start}
+        edges: set[str] = set()
+        layer = [start]
+        for hop in range(max_hops):
+            seen = frozenset(dist)
+            next_layer: list[str] = []
+            for node in layer:
+                found, via_nodes, via_edges = self._hop(node, seen)
+                for target in sorted(found):
+                    if target not in dist:
+                        dist[target] = hop + 1
+                        next_layer.append(target)
+                for via in via_nodes:
+                    dist.setdefault(via, hop)
+                nodes.update(found, via_nodes)
+                edges.update(via_edges)
+            if not next_layer:
+                break
+            layer = next_layer
+        return dist, nodes, edges
+
+    def _hop(self, node: str, seen: frozenset[str]) -> tuple[set[str], set[str], set[str]]:
+        page = self._page(node)
+        if page.is_arrow(node) and page.nodes[node].get("page_io") == self.target_io:
+            return self._cross_page(node, seen)
+        targets = [
+            arrow for arrow in page.arrows(self.target_io)
+            if arrow != node and node in page.distances(arrow)
+        ]
+        if not targets:
+            return self._walk(node, seen, page, lambda _x, _y: True)
+        found: set[str] = set()
+        via_nodes: set[str] = set()
+        via_edges: set[str] = set()
+        for arrow in targets:
+            distance = page.distances(arrow)
+
+            def closer(x: str, y: str, distance: dict[str, int] = distance, arrow: str = arrow) -> bool:
+                return (
+                    y in distance
+                    and distance[y] == distance[x] - 1
+                    and (y == arrow or not page.is_arrow(y))
+                )
+
+            walk = self._walk(node, seen, page, closer)
+            found |= walk[0]
+            via_nodes |= walk[1]
+            via_edges |= walk[2]
+        return found, via_nodes, via_edges
+
+    def _walk(
+        self,
+        start: str,
+        seen: frozenset[str],
+        page: PageGraph,
+        allowed: Callable[[str, str], bool],
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Walk allowed in-page steps through skipped kinds up to the first counted nodes."""
+        predecessors: dict[str, list[tuple[str, str]]] = {start: []}
+        found: set[str] = set()
+        queue = deque([start])
+        while queue:
+            current = queue.popleft()
+            for edge_id, neighbor in page.adjacency[current]:
+                if neighbor == start or not allowed(current, neighbor):
+                    continue
+                if neighbor in predecessors:
+                    predecessors[neighbor].append((edge_id, current))
+                    continue
+                predecessors[neighbor] = [(edge_id, current)]
+                if id_kind(neighbor) in self.skipped:
+                    queue.append(neighbor)
+                elif neighbor not in seen:
+                    found.add(neighbor)
+        # Keep only the connectors and edges on routes that ended at a new node.
+        via_nodes: set[str] = set()
+        via_edges: set[str] = set()
+        stack = list(found)
+        while stack:
+            for edge_id, previous in predecessors[stack.pop()]:
+                via_edges.add(edge_id)
+                if previous != start and previous not in via_nodes:
+                    via_nodes.add(previous)
+                    stack.append(previous)
+        return found, via_nodes, via_edges
+
+    def _cross_page(self, arrow: str, seen: frozenset[str]) -> tuple[set[str], set[str], set[str]]:
+        """Follow a target arrow's transfers, one edge per partner arrow."""
+        partners: dict[str, str] = {}
+        for edge_id, kind, source, target, source_page, target_page, properties in self.connection.execute(
+            "SELECT id, kind, source_id, target_id, source_page, target_page, properties "
+            "FROM edges WHERE kind = 'transfer' AND (source_id = ? OR target_id = ?) ORDER BY id",
+            (arrow, arrow),
+        ):
+            self.edges.setdefault(edge_id, {
+                "id": edge_id,
+                "type": kind,
+                "source": source,
+                "target": target,
+                "source_page": source_page,
+                "target_page": target_page,
+                **json.loads(properties),
+            })
+            partners.setdefault(target if source == arrow else source, edge_id)
+        found = {partner for partner in partners if partner not in seen}
+        return found, set(), {partners[partner] for partner in found}
+
+    def _page(self, node: str) -> PageGraph:
+        if node not in self.page_of:
+            filename, page_number = self.connection.execute(
+                "SELECT filename, page FROM nodes WHERE id = ?",
+                (node,),
+            ).fetchone()
+            page = PageGraph(self.connection, filename, page_number)
+            self.edges.update(page.edges)
+            for page_node in page.nodes:
+                self.page_of[page_node] = page
+        return self.page_of[node]
 
 
 def _project_pages(

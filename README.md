@@ -264,6 +264,11 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 - `start` 可以是全局 id，也可以是 `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`；`file` 带不带 `.pdf` 均可。
 - 到达 `skip` 中的类型（可选 `endpoint`、`net`、`group`、`wire`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 是 component 之间的边，穿过它计一跳。
 - 每个节点只会被到达一次，因此回环不会重复展开。
+- `direction` 默认为 `any`（不限方向）。设为 `downstream` 或 `upstream` 时，每一跳都朝本页 `page_io` 为 `output` 或 `input` 的 arrow component 前进：
+  - 当前节点能通往这些 arrow 时，只沿通往它们的最短路径走；
+  - 通不到时（包括本页没有该方向 arrow 的末端页），允许跳到相邻节点；
+  - 只有该方向的 arrow 才会沿 transfer 跨页，反方向 arrow 不跨页；
+  - 结果只包含实际走过的节点和边。
 - 返回中的 `open_endpoints` 是一端已追踪、另一端尚未追踪的 endpoint，即 tracing 停下的位置。
 
 ## 导入已有解析结果

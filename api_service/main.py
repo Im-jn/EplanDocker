@@ -43,6 +43,7 @@ from pdf_parser.document_trace import (
     TraceStartNotFoundError,
     trace_document as trace_parsed_graph,
 )
+from pdf_parser.page_stream import page_arrow_distances
 from pdf_parser.query_engine import query as handle_query
 
 
@@ -64,7 +65,7 @@ class TraceRequest(BaseModel):
     skip: list[Literal["endpoint", "net", "group", "wire"]] = Field(
         default_factory=lambda: list(DEFAULT_SKIP)
     )
-    direction: Literal["any"] = "any"
+    direction: Literal["any", "upstream", "downstream"] = "any"
     response_format: Literal["subgraph", "hops"] = "subgraph"
 
 
@@ -728,6 +729,19 @@ def read_document(document_id: str) -> dict[str, Any]:
     return _job_response(job)
 
 
+@app.get("/api/v1/page-stream")
+def page_stream(file: str, page: int) -> dict[str, Any]:
+    """Return a page's arrows and each node's distance to them, for directional hops."""
+    if page < 1:
+        raise HTTPException(422, "page must be positive")
+    try:
+        return page_arrow_distances(PARSED_GRAPH_PATH, file, page)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(500, "Parsed graph database is unreadable") from exc
+
+
 @app.post("/api/v1/trace")
 def trace(request: TraceRequest) -> dict[str, Any]:
     """Trace by global id or by submitted filename, without internal document ids."""
@@ -746,6 +760,7 @@ def trace(request: TraceRequest) -> dict[str, Any]:
             start_local_id=start.id if local_start else None,
             max_hops=request.max_hops,
             skip=request.skip,
+            direction=request.direction,
             response_format=request.response_format,
         )
     except TraceDocumentNotFoundError as exc:

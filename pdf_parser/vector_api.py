@@ -41,7 +41,7 @@ from pdf_parser.tools.vector_entity import VectorDisjointSet
 from pdf_parser.tools.vector_matcher import VectorMatcher
 from pdf_parser.tools.vector_pin import VectorPinDetector
 from pdf_parser.tools.vector_visualize import render_vector_text_png
-from pdf_parser.utils import bbox_from_shapes, bbox_to_dict, resolve_repo_relative
+from pdf_parser.utils import bbox_from_shapes, bbox_to_dict, coerce_bbox, resolve_repo_relative
 
 
 PAGE_CACHE_LIMIT = PARSER_CONFIG.api_cache.page_limit
@@ -263,7 +263,7 @@ def _document_trace_index(
 
     page_indexes: list[dict[str, Any]] = []
     transfers: list[dict[str, Any]] = []
-    entity_fields = ("id", "type", "page", "bbox", "title", "descriptions", "page_io")
+    entity_fields = ("id", "type", "subclass", "page", "bbox", "title", "descriptions", "page_io")
     transfer_fields = (
         "source_page",
         "source_component",
@@ -299,6 +299,7 @@ def _document_trace_index(
             "wires": compact_entities("wires"),
             "endpoints": compact_entities("endpoints"),
             "nets": compact_entities("nets"),
+            "groups": compact_entities("groups"),
             "relations": [
                 {
                     "type": relation.get("type"),
@@ -311,8 +312,7 @@ def _document_trace_index(
                     relation.get("type") == "connection"
                     or (
                         relation.get("type") == "contains"
-                        and str(relation.get("source", "")).startswith("net:")
-                        and str(relation.get("target", "")).startswith("wire:")
+                        and str(relation.get("source", "")).startswith(("net:", "group:"))
                     )
                 )
             ] if isinstance(relations, list) else [],
@@ -670,6 +670,11 @@ def _load_persisted_extract_info(pdf_path: Path, page: int) -> dict[str, Any] | 
     return _read_json(_persistence_directory(pdf_path) / filename)
 
 
+def _bbox_area(bbox: Any) -> float:
+    x0, y0, x1, y1 = coerce_bbox(bbox)
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
 def _bbox_overlap_ratio(a: dict[str, float], b: dict[str, float]) -> float:
     """Return the intersection area as a fraction of the smaller box's area."""
     ix0 = max(a["x0"], b["x0"])
@@ -941,6 +946,7 @@ def _extract_page_info(
                 entity_vectors,
                 entity_texts,
                 symbol_catalog["symbols"],
+                content_area=_bbox_area(split_result["content_bbox"]),
             )
             entity_results.append(extracted)
             remaining_vectors.extend(entity_remaining.vectors)

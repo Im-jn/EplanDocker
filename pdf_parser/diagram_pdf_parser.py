@@ -46,7 +46,7 @@ from pdf_parser.tools.text_matcher import TextMatcher
 from pdf_parser.tools.endpoints_tools import EndpointTools
 from pdf_parser.tools.vector_entity import VectorDisjointSet
 from pdf_parser.tools.vector_visualize import render_vector_text_png_bytes
-from pdf_parser.utils import resolve_repo_relative
+from pdf_parser.utils import coerce_bbox, resolve_repo_relative
 
 
 ProgressCallback = Callable[[str], None]
@@ -324,6 +324,7 @@ def parse_diagram_pdf(
                     entity_vectors,
                     entity_texts,
                     symbol_list,
+                    content_area=_bbox_area(content_bbox),
                 )
                 entity_results.append(extracted_content)
                 remaining_vector_records.extend(entity_remaining_vectors.vectors)
@@ -520,6 +521,11 @@ def _is_tiny_nontext_entity(entity: dict[str, Any], vector_count: int, text_coun
         and float(bbox["x1"]) - float(bbox["x0"]) <= 20.0
         and float(bbox["y1"]) - float(bbox["y0"]) <= 20.0
     )
+
+
+def _bbox_area(bbox: Any) -> float:
+    x0, y0, x1, y1 = coerce_bbox(bbox)
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
 
 
 def _ignore_progress(_: str) -> None:

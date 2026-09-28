@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from numbers import Integral
 from typing import Any, Sequence
 
@@ -23,20 +24,32 @@ WIRE_SEED_MIN_LENGTH_PT = PARSER_CONFIG.diagram.wire_seed_min_length_pt
 WIRE_TERMINAL_DIAGONAL_MAX_LENGTH_PT = (
     PARSER_CONFIG.diagram.wire_terminal_diagonal_max_length_pt
 )
+DEVICE_TAG_RE = re.compile(PARSER_CONFIG.diagram.device_tag_pattern)
 
 
 def extract_diagram(
     vector_base: VectorBase,
     text_base: TextBase,
     symbol_list: Sequence[Sequence[PathBase]],
+    *,
+    content_area: float | None = None,
 ) -> dict[str, Any]:
-    """Find diagram elements, groups, and wires."""
+    """Find diagram elements, groups, and wires.
+
+    ``content_area`` is the page drawing region's area; it enables the fallback
+    that treats a dashed box framing several labelled devices as a group.
+    """
     if not isinstance(vector_base, VectorBase):
         raise TypeError("vector_base must be a VectorBase")
     if not isinstance(text_base, TextBase):
         raise TypeError("text_base must be a TextBase")
 
-    elements, groups, remaining_vectors = extract_vector_elements(vector_base, symbol_list)
+    elements, groups, remaining_vectors = extract_vector_elements(
+        vector_base,
+        symbol_list,
+        text_base=text_base,
+        content_area=content_area,
+    )
     wires, remaining_vectors = extract_wires(remaining_vectors)
 
     return {
@@ -358,6 +371,9 @@ def _strtree_result_index(result: Any) -> int:
 def extract_vector_elements(
     vector_base: VectorBase,
     symbol_list: Sequence[Sequence[PathBase]],
+    *,
+    text_base: TextBase | None = None,
+    content_area: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], VectorBase]:
     elements: list[dict[str, Any]] = []
     groups: list[dict[str, Any]] = []
@@ -546,9 +562,89 @@ def extract_vector_elements(
         })
         removed_vector_ids.update(vector_ids)
     remaining_vectors = remove_matched_vector_ids(remaining_vectors, removed_vector_ids)
+    # Before boxes absorb their interior, so a released frame keeps its wires.
+    _release_container_boxes(elements, groups, text_base, content_area)
     remaining_vectors = assign_remaining_vectors_to_elements(remaining_vectors, elements)
 
     return elements, groups, remaining_vectors
+
+def _release_container_boxes(
+    elements: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+    text_base: TextBase | None,
+    content_area: float | None,
+) -> None:
+    """Turn dashed boxes that frame several complete, labelled devices into groups.
+
+    A short-dash box normally draws one component whose inner shapes are only
+    illustrative, so it owns everything inside it. A drawing mistake can instead
+    wrap a whole circuit in such a box, which would then absorb every wire in it.
+    Only a box meeting all of these is treated as a frame:
+
+    * it covers at least ``container_min_area_ratio`` of the drawing region;
+    * at least ``container_min_device_tags`` distinct device tags lie inside it;
+    * at least ``container_min_labelled_elements`` of those tags sit next to an
+      element inside it, i.e. the interior stays meaningful without the frame.
+    """
+    config = PARSER_CONFIG.diagram
+    if text_base is None or not content_area or content_area <= 0:
+        return
+    tags = [
+        (str(text["text"]).strip(), box(*coerce_bbox(text["location"])))
+        for text in text_base
+        if DEVICE_TAG_RE.match(str(text.get("text", "")))
+    ]
+    if len(tags) < config.container_min_device_tags:
+        return
+
+    containers = []
+    for element in elements:
+        attributes = element.get("attributes", {})
+        if element.get("type") != "box" or attributes.get("line_style") != "dashed":
+            continue
+        frame = attributes["polygon"]
+        if frame.area < config.container_min_area_ratio * content_area:
+            continue
+        inside = [(tag, geometry) for tag, geometry in tags if frame.covers(geometry.centroid)]
+        if len({tag for tag, _ in inside}) < config.container_min_device_tags:
+            continue
+        inner = [
+            geometry
+            for other in elements
+            if other is not element
+            and frame.covers((geometry := box(*coerce_bbox(other["bbox"]))).centroid)
+        ]
+        labelled = {
+            tag
+            for tag, geometry in inside
+            if any(
+                geometry.distance(other) <= config.container_tag_element_distance_pt
+                for other in inner
+            )
+        }
+        if len(labelled) >= config.container_min_labelled_elements:
+            containers.append(element)
+
+    if not containers:
+        return
+    for element in containers:
+        groups.append({
+            "id": len(groups),
+            "type": "group",
+            "shape": element["shape"],
+            "bbox": bbox_to_dict(coerce_bbox(element["bbox"])),
+            "attributes": {
+                "polygon": element["attributes"]["polygon"],
+                "line_style": "dashed",
+                "released_container": True,
+            },
+            "title": [],
+            "descriptions": [],
+        })
+    released = {id(element) for element in containers}
+    elements[:] = [element for element in elements if id(element) not in released]
+    for index, element in enumerate(elements):
+        element["id"] = index
 
 
 def extract_vector_components(
