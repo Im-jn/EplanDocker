@@ -25,7 +25,6 @@ def test_pdf_info_json_round_trip_uses_plain_data() -> None:
             12: {
                 "page_type": "multi",
                 "info_table": {"html": "<table></table>"},
-                "crosspage_relations": {"hyperlinks": [], "transfers": []},
                 "diagram": {
                     "elements": [],
                     "remaining_vectors": [vector],
@@ -69,7 +68,6 @@ def test_pdf_info_json_round_trip_uses_plain_data() -> None:
 def test_main_saves_parser_result_to_requested_output() -> None:
     pdf_info = {"pages": {12: {
         "diagram": {"components": [], "wires": []},
-        "crosspage_relations": {"hyperlinks": [], "transfers": []},
     }}}
 
     with TemporaryDirectory() as directory:
@@ -78,7 +76,17 @@ def test_main_saves_parser_result_to_requested_output() -> None:
             patch.object(
                 sys,
                 "argv",
-                ["pdf_parser.main", "--output-file", str(output_path)],
+                [
+                    "pdf_parser.main",
+                    "--pdf-file-path",
+                    "plan.pdf",
+                    "--output-file",
+                    str(output_path),
+                    "--parsed-json-dir",
+                    directory,
+                    "--parsed-graph-file",
+                    str(Path(directory) / "graph.sqlite3"),
+                ],
             ),
             patch("pdf_parser.main.parse_diagram_pdf", return_value=pdf_info),
         ):
@@ -87,7 +95,12 @@ def test_main_saves_parser_result_to_requested_output() -> None:
         assert load_pdf_info(output_path) == {
             "pages": {"12": {
                 "diagram": {"components": [], "wires": []},
-                "crosspage_relations": {"hyperlinks": [], "transfers": []},
+            }},
+        }
+        assert load_pdf_info(Path(directory) / "plan.json") == {
+            "document": {"filename": "plan.pdf"},
+            "pages": {"12": {
+                "diagram": {"components": [], "wires": []},
             }},
         }
 
@@ -95,10 +108,13 @@ def test_main_saves_parser_result_to_requested_output() -> None:
 def test_checkpoint_restores_only_completed_page_results() -> None:
     pdf_info = {
         "pages": {
-            1: {"diagram": {}, "crosspage_relations": {"hyperlinks": [], "transfers": []}},
+            1: {"diagram": {}},
             2: {
-                "diagram": {"components": [{"id": "K1"}]},
-                "crosspage_relations": {"hyperlinks": [], "transfers": []},
+                "diagram": {
+                    "components": [{"id": "K1"}],
+                    "hyperlinks": [],
+                    "transfers": [],
+                },
             },
         },
     }
@@ -114,8 +130,8 @@ def test_checkpoint_restores_only_completed_page_results() -> None:
         )
         fresh_pdf_info = {
             "pages": {
-                1: {"diagram": {}, "crosspage_relations": {"hyperlinks": [], "transfers": []}},
-                2: {"diagram": {}, "crosspage_relations": {"hyperlinks": [], "transfers": []}},
+                1: {"diagram": {}},
+                2: {"diagram": {}},
             },
         }
 
@@ -129,8 +145,6 @@ def test_checkpoint_restores_only_completed_page_results() -> None:
         assert restored == {2}
         assert fresh_pdf_info["pages"][2]["diagram"] == {
             "components": [{"id": "K1"}],
-        }
-        assert fresh_pdf_info["pages"][2]["crosspage_relations"] == {
             "hyperlinks": [],
             "transfers": [],
         }

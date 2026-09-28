@@ -191,8 +191,7 @@ def _build_graph(document_result: dict[str, Any]) -> _TraceGraph:
                         (page_number, source.split(":", 1)[1]), set()
                     ).add(wire)
 
-        crosspage = page_record.get("crosspage_relations", {})
-        transfers = crosspage.get("transfers", []) if isinstance(crosspage, dict) else []
+        transfers = diagram.get("transfers", [])
         for transfer in transfers:
             if isinstance(transfer, dict):
                 graph.transfers.append(dict(transfer))

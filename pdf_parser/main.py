@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pdf_parser.diagram_pdf_parser import parse_diagram_pdf, save_pdf_info
 from pdf_parser.llm_judger import LLMConfig
+from pdf_parser.parsed_graph import save_parsed_graph
+from pdf_parser.parsed_json import build_parsed_json, save_parsed_json
 from pdf_parser.utils import resolve_repo_relative
 
 
@@ -45,6 +47,16 @@ def main() -> None:
         "--output-file",
         default="./storage/output/pdf_parsing_result/example.json",
         help="JSON file used to save the complete extraction result.",
+    )
+    parser.add_argument(
+        "--parsed-json-dir",
+        default="./storage/output/parsed_json",
+        help="Directory receiving the simplified <pdf name>.json for other work packages.",
+    )
+    parser.add_argument(
+        "--parsed-graph-file",
+        default="./storage/output/parsed_graph.sqlite3",
+        help="SQLite node/edge graph shared by all parsed documents.",
     )
     parser.add_argument(
         "--llm-provider",
@@ -107,6 +119,16 @@ def main() -> None:
         if checkpoint_path.is_file():
             checkpoint_path.unlink()
         print(f"[pdf_parser] Saved extraction result to {output_path}", flush=True)
+        parsed = build_parsed_json(pdf_info, filename=Path(args.pdf_file_path).name)
+        parsed_json_path = save_parsed_json(parsed, args.parsed_json_dir)
+        print(f"[pdf_parser] Saved parsed JSON to {parsed_json_path}", flush=True)
+        graph_path = resolve_repo_relative(args.parsed_graph_file)
+        graph_counts = save_parsed_graph(parsed, graph_path)
+        print(
+            f"[pdf_parser] Saved {graph_counts['nodes']} nodes and "
+            f"{graph_counts['edges']} edges to {graph_path}",
+            flush=True,
+        )
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
 

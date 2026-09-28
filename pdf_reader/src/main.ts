@@ -1297,11 +1297,6 @@ type ExtractedHyperlink = {
   target_component?: number | string
 }
 
-type ExtractedCrosspageRelations = {
-  hyperlinks: ExtractedHyperlink[]
-  transfers: ExtractedHyperlink[]
-}
-
 type InfoTraceKind = 'component' | 'wire'
 
 type InfoTraceEntity = {
@@ -1377,7 +1372,6 @@ type ExtractInfoResult = {
   category: 'extract_info'
   page_number: number
   diagram: ExtractedDiagram
-  crosspage_relations: ExtractedCrosspageRelations
   info_table: ExtractedInfoTable
   _text_ownership?: ExtractedTextOwnership[]
   // Non-enumerable frontend projections for interaction code.
@@ -1399,6 +1393,8 @@ type ExtractedDiagram = {
   nets: ExtractedNet[]
   groups: ExtractedGroup[]
   relations: ExtractedRelation[]
+  hyperlinks?: ExtractedHyperlink[]
+  transfers?: ExtractedHyperlink[]
   remaining_vectors?: ApiPathBase[]
   remaining_text?: Array<Record<string, unknown>>
 }
@@ -6108,8 +6104,8 @@ function extractedCrosspageRelationForReaderLink(
   if (!result || result.page_number !== item.page_number || targetPage === null) return undefined
   const itemBox = mupdfBBoxToPdf(item.bbox, pageData.page_size.height_pt)
   return [
-    ...(result.crosspage_relations.hyperlinks ?? []),
-    ...(result.crosspage_relations.transfers ?? []),
+    ...(result.diagram.hyperlinks ?? []),
+    ...(result.diagram.transfers ?? []),
   ]
     .filter((relation) => (
       relation.source_page === item.page_number
@@ -6636,7 +6632,7 @@ function renderExtractInfoResult(result: ExtractInfoResult): void {
   extractJsonSearchStatus.textContent = ''
   const summary = document.createElement('div')
   summary.className = 'extract-result-summary'
-  summary.textContent = `Page ${result.page_number} · ${result.elements.length} elements · ${result.components.length} components · ${result.wires.length} wires · ${result.endpoints.length} endpoints · ${result.nets.length} nets · ${result.groups.length} groups · ${result.crosspage_relations.hyperlinks.length} hyperlinks · ${result.crosspage_relations.transfers.length} transfers · ${result.info_table?.cells.length ?? 0} info cells`
+  summary.textContent = `Page ${result.page_number} · ${result.elements.length} elements · ${result.components.length} components · ${result.wires.length} wires · ${result.endpoints.length} endpoints · ${result.nets.length} nets · ${result.groups.length} groups · ${result.diagram.hyperlinks?.length ?? 0} hyperlinks · ${result.diagram.transfers?.length ?? 0} transfers · ${result.info_table?.cells.length ?? 0} info cells`
   const elementsByType = Object.fromEntries(
     Object.entries(
       result.elements.reduce<Record<string, ExtractedElement[]>>((groups, element) => {
@@ -6652,7 +6648,6 @@ function renderExtractInfoResult(result: ExtractInfoResult): void {
       elements: elementsByType,
     },
     info_table: result.info_table,
-    crosspage_relations: result.crosspage_relations,
   }
   const jsonTree = buildJsonNode(visualResult, 'result', true)
   extractInfoResult.append(summary, jsonTree)

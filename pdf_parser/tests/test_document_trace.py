@@ -43,8 +43,9 @@ def _document() -> dict:
                         {"type": "contains", "source": "net:7", "target": "wire:2"},
                         {"type": "contains", "source": "net:7", "target": "wire:3"},
                     ],
+                    "hyperlinks": [],
+                    "transfers": [transfer, dict(transfer)],
                 },
-                "crosspage_relations": {"hyperlinks": [], "transfers": [transfer, dict(transfer)]},
             },
             "2": {
                 "diagram": {
@@ -53,8 +54,9 @@ def _document() -> dict:
                     "endpoints": [],
                     "nets": [],
                     "relations": [],
+                    "hyperlinks": [],
+                    "transfers": [],
                 },
-                "crosspage_relations": {"hyperlinks": [], "transfers": []},
             },
         }
     }

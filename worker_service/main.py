@@ -9,9 +9,17 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from eplan_runtime import INTERNAL_TOKEN, PDF_ROOT, RESULT_ROOT
+from eplan_runtime import (
+    INTERNAL_TOKEN,
+    PARSED_GRAPH_PATH,
+    PARSED_JSON_ROOT,
+    PDF_ROOT,
+    RESULT_ROOT,
+)
 from pdf_parser.diagram_pdf_parser import parse_diagram_pdf, save_pdf_info
 from pdf_parser.llm_judger import LLMConfig
+from pdf_parser.parsed_graph import save_parsed_graph
+from pdf_parser.parsed_json import build_parsed_json, save_parsed_json
 
 
 API_URL = os.getenv("EPLAN_API_URL", "http://api:8000").rstrip("/")
@@ -91,6 +99,9 @@ def process_job(job: dict[str, Any]) -> None:
             show_page_progress=False,
         )
         saved_path = save_pdf_info(pdf_info, result_path)
+        parsed = build_parsed_json(pdf_info, filename=job["original_filename"])
+        save_parsed_json(parsed, PARSED_JSON_ROOT)
+        save_parsed_graph(parsed, PARSED_GRAPH_PATH)
         checkpoint_path.unlink(missing_ok=True)
         api_request(
             "POST",

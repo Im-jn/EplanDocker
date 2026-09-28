@@ -177,10 +177,10 @@ def parse_diagram_pdf(
             },
             "pages": {},
             "symbol_overview": {},
-            "crosspage_relations": {
-                "hyperlinks": [],
-                "transfers": [],
-            },
+        }
+        crosspage_links: dict[str, list[dict[str, Any]]] = {
+            "hyperlinks": [],
+            "transfers": [],
         }
         report("Scanning page information regions")
         page_numbers = tqdm(
@@ -209,10 +209,6 @@ def parse_diagram_pdf(
             page_record = {
                 "page_type": page_type,
                 "info_table": info_table,
-                "crosspage_relations": {
-                    "hyperlinks": [],
-                    "transfers": [],
-                },
                 "diagram": {},
             }
             pdf_info["pages"][page_num] = page_record
@@ -255,11 +251,9 @@ def parse_diagram_pdf(
             )
         for page_index, page_num in enumerate(diagram_page_numbers, start=1):
             if page_num in completed_pages:
-                page_record = pdf_info["pages"][page_num]
+                page_diagram = pdf_info["pages"][page_num]["diagram"]
                 for collection in ("hyperlinks", "transfers"):
-                    pdf_info["crosspage_relations"][collection].extend(
-                        page_record.get("crosspage_relations", {}).get(collection, [])
-                    )
+                    crosspage_links[collection].extend(page_diagram.get(collection, []))
                 report(
                     f"Diagram page {page_index}/{len(diagram_page_numbers)}: "
                     f"page {page_num} restored from checkpoint"
@@ -389,15 +383,11 @@ def parse_diagram_pdf(
             )
             in_page_info["remaining_vector"] = remaining_vector_base
             in_page_info["remaining_text"] = text_result["remaining_text"]
-            pdf_info["pages"][page_num]["diagram"] = serialize_diagram(
-                in_page_info,
-                page=page_num,
-            )
-            pdf_info["pages"][page_num]["crosspage_relations"] = page_links
+            page_diagram = serialize_diagram(in_page_info, page=page_num)
+            page_diagram.update(page_links)
+            pdf_info["pages"][page_num]["diagram"] = page_diagram
             for collection in ("hyperlinks", "transfers"):
-                pdf_info["crosspage_relations"][collection].extend(
-                    page_links[collection]
-                )
+                crosspage_links[collection].extend(page_links[collection])
             completed_pages.add(page_num)
             if checkpoint_path is not None:
                 _save_checkpoint(
@@ -430,17 +420,16 @@ def parse_diagram_pdf(
         for collection in ("hyperlinks", "transfers"):
             resolved_links = (
                 attach_transfer_targets(
-                    pdf_info["crosspage_relations"][collection],
+                    crosspage_links[collection],
                     components_by_page,
                     elements_by_page,
                 )
                 if collection == "transfers"
                 else attach_hyperlink_targets(
-                    pdf_info["crosspage_relations"][collection],
+                    crosspage_links[collection],
                     components_by_page,
                 )
             )
-            pdf_info["crosspage_relations"][collection] = resolved_links
             resolved_target_count = sum(
                 link.get("target_component") is not None
                 for link in resolved_links
@@ -453,9 +442,9 @@ def parse_diagram_pdf(
             for link in resolved_links:
                 source_page = int(link["source_page"])
                 links_by_source_page.setdefault(source_page, []).append(link)
-            for page_num, page_record in pdf_info["pages"].items():
-                page_record["crosspage_relations"][collection] = (
-                    links_by_source_page.get(int(page_num), [])
+            for page_num in diagram_page_numbers:
+                pdf_info["pages"][page_num]["diagram"][collection] = (
+                    links_by_source_page.get(page_num, [])
                 )
 
     report(
@@ -476,17 +465,12 @@ def _save_checkpoint(
     """Atomically persist only fully completed diagram-page results."""
     completed = sorted(completed_pages)
     payload = {
-        "version": 14,
+        "version": 15,
         "document_id": document_id,
         "page_count": int(page_count),
         "completed_pages": completed,
         "pages": {
-            str(page_num): {
-                "diagram": pdf_info["pages"][page_num]["diagram"],
-                "crosspage_relations": pdf_info["pages"][page_num][
-                    "crosspage_relations"
-                ],
-            }
+            str(page_num): {"diagram": pdf_info["pages"][page_num]["diagram"]}
             for page_num in completed
         },
     }
@@ -503,7 +487,7 @@ def _restore_checkpoint(
     """Restore completed pages, rejecting stale or malformed checkpoints."""
     payload = load_pdf_info(checkpoint_path)
     if (
-        payload.get("version") != 14
+        payload.get("version") != 15
         or payload.get("document_id") != document_id
         or payload.get("page_count") != page_count
     ):
@@ -523,11 +507,6 @@ def _restore_checkpoint(
         if not isinstance(stored_page, dict) or not isinstance(page_record, dict):
             raise ValueError(f"Invalid checkpoint page {page_num}: {checkpoint_path}")
         page_record["diagram"] = dict(stored_page.get("diagram", {}))
-        stored_crosspage = stored_page.get("crosspage_relations", {})
-        page_record["crosspage_relations"] = {
-            "hyperlinks": list(stored_crosspage.get("hyperlinks", [])),
-            "transfers": list(stored_crosspage.get("transfers", [])),
-        }
         completed.add(page_num)
     return completed
 

@@ -39,7 +39,6 @@ def test_document_result_uses_pdf_stem_and_returns_requested_diagram_page() -> N
                         "page_type": "multi",
                         "diagram": _diagram(),
                         "info_table": {"html": "page 2"},
-                        "crosspage_relations": {"hyperlinks": [], "transfers": []},
                     },
                 },
             }),
@@ -102,7 +101,6 @@ def test_document_result_supports_document_scoped_api_layout() -> None:
                         "page_type": "multi",
                         "diagram": _diagram(),
                         "info_table": {},
-                        "crosspage_relations": {"hyperlinks": [], "transfers": []},
                     },
                 },
             }),
@@ -191,16 +189,15 @@ def test_document_trace_index_keeps_one_transfer_record_for_bidirectional_client
             "target_page": 2,
             "target_component": 9,
         }
+        page_1_diagram["transfers"] = [transfer]
         (result_root / "example.json").write_text(
             json.dumps({
                 "pages": {
                     "1": {
                         "diagram": page_1_diagram,
-                        "crosspage_relations": {"hyperlinks": [], "transfers": [transfer]},
                     },
                     "2": {
                         "diagram": page_2_diagram,
-                        "crosspage_relations": {"hyperlinks": [], "transfers": []},
                     },
                 },
             }),

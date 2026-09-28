@@ -318,8 +318,7 @@ def _document_trace_index(
             ] if isinstance(relations, list) else [],
         })
 
-        crosspage = page_result.get("crosspage_relations", {})
-        page_transfers = crosspage.get("transfers", []) if isinstance(crosspage, dict) else []
+        page_transfers = diagram.get("transfers", [])
         if isinstance(page_transfers, list):
             transfers.extend(
                 {
@@ -996,6 +995,7 @@ def _extract_page_info(
         page_result["remaining_vector"] = page_remaining
         page_result["remaining_text"] = text_result["remaining_text"]
         diagram = serialize_diagram(page_result, page=page)
+        diagram.update(page_links)
         for element in diagram["elements"]:
             element["vector_indices"] = _vector_indices(element.get("shape", []), index_by_vector_id)
 
@@ -1005,7 +1005,6 @@ def _extract_page_info(
         "symbol_pages": symbol_pages,
         "diagram": diagram,
         "info_table": info_table,
-        "crosspage_relations": page_links,
         "_text_ownership": _hidden_text_ownership(text_result["matches"]),
     }
     serialized = _json_safe(result)

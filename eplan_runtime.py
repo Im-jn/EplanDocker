@@ -12,6 +12,8 @@ STORAGE_ROOT = Path(os.getenv("EPLAN_STORAGE_ROOT", REPO_ROOT / "storage")).reso
 PDF_ROOT = STORAGE_ROOT / "data" / "eplan_pdf"
 RESULT_ROOT = STORAGE_ROOT / "output" / "pdf_parsing_result"
 READER_ROOT = STORAGE_ROOT / "output" / "reader_data"
+PARSED_JSON_ROOT = STORAGE_ROOT / "output" / "parsed_json"
+PARSED_GRAPH_PATH = STORAGE_ROOT / "output" / "parsed_graph.sqlite3"
 STATE_ROOT = STORAGE_ROOT / "state"
 TEMP_ROOT = STORAGE_ROOT / "tmp"
 LOG_ROOT = STORAGE_ROOT / "logs"
@@ -56,5 +58,5 @@ INTERNAL_TOKEN = _load_or_create_internal_token()
 
 
 def ensure_storage() -> None:
-    for directory in (PDF_ROOT, RESULT_ROOT, READER_ROOT, STATE_ROOT, TEMP_ROOT, LOG_ROOT):
+    for directory in (PDF_ROOT, RESULT_ROOT, READER_ROOT, PARSED_JSON_ROOT, STATE_ROOT, TEMP_ROOT, LOG_ROOT):
         directory.mkdir(parents=True, exist_ok=True)
