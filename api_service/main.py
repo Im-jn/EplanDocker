@@ -8,13 +8,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import fitz
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from api_service import database
 from api_service.logging_config import (
@@ -33,10 +34,24 @@ from eplan_runtime import (
     ensure_storage,
 )
 from api_service.publisher import request_publish
+from pdf_parser.document_trace import TraceStartNotFoundError, trace_document_file
 from pdf_parser.query_engine import query as handle_query
 
 
 logger = get_logger("api")
+
+
+class DocumentTraceStart(BaseModel):
+    page: int = Field(ge=1)
+    kind: Literal["component", "wire"]
+    id: int | str
+
+
+class DocumentTraceRequest(BaseModel):
+    start: DocumentTraceStart
+    max_hops: int = Field(default=1, ge=0, le=50)
+    direction: Literal["any"] = "any"
+    response_format: Literal["subgraph", "hops"] = "subgraph"
 
 
 def _job_response(job: dict[str, Any]) -> dict[str, Any]:
@@ -686,6 +701,31 @@ def read_document(document_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(404, "Completed document not found")
     return _job_response(job)
+
+
+@app.post("/api/v1/documents/{document_id}/trace")
+def trace_document(document_id: str, request: DocumentTraceRequest) -> dict[str, Any]:
+    job = database.get_document(document_id)
+    if job is None:
+        raise HTTPException(404, "Completed document not found")
+    _, result_directory, _ = _document_storage_paths(document_id)
+    result_path = result_directory / "result.json"
+    if not result_path.is_file():
+        raise HTTPException(500, "Recorded parsing result is missing")
+    try:
+        traced = trace_document_file(
+            result_path,
+            start_page=request.start.page,
+            start_kind=request.start.kind,
+            start_id=request.start.id,
+            max_hops=request.max_hops,
+            response_format=request.response_format,
+        )
+    except TraceStartNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, "Recorded parsing result is unreadable") from exc
+    return {"document_id": document_id, **traced}
 
 
 @app.post("/api/v1/documents/{document_id}/prepare", status_code=202)

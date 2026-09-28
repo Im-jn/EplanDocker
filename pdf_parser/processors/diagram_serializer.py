@@ -192,7 +192,7 @@ def _entity(
     element_ids: Iterable[Any],
     bbox: Any | None = None,
 ) -> dict[str, Any]:
-    return {
+    entity = {
         "id": source.get("id"),
         "type": entity_type,
         "page": int(page),
@@ -201,6 +201,9 @@ def _entity(
         "descriptions": _text_list(source, "descriptions"),
         "elements": list(element_ids),
     }
+    if source.get("page_io") is not None:
+        entity["page_io"] = source["page_io"]
+    return entity
 
 
 def _append_shape_element(

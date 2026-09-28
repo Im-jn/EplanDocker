@@ -231,6 +231,7 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | 重新处理缓存 PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 和未完成任务，保留已完成任务及结果 |
 | `GET` | `/api/v1/documents` | 列出已解析文档及其 reader 状态 |
+| `POST` | `/api/v1/documents/{document_id}/trace` | 从 component 或 wire 开始执行文档级 n-hop tracing |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | 按需启动 reader-data 预处理 |
 | `POST` | `/api/v1/queries` | 查询已完成文档 |
 

@@ -232,6 +232,7 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | Reprocess a cached PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | Delete a cached PDF and unfinished tasks while retaining completed results |
 | `GET` | `/api/v1/documents` | List parsed documents and their reader status |
+| `POST` | `/api/v1/documents/{document_id}/trace` | Run document-level n-hop tracing from a component or wire |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | Start reader-data preparation on demand |
 | `POST` | `/api/v1/queries` | Query a completed document |
 

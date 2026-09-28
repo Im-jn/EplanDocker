@@ -23,6 +23,7 @@ from pdf_parser.processors.hyperlink_extractor import (
     split_transfers,
 )
 from pdf_parser.processors.diagram_serializer import serialize_diagram
+from pdf_parser.processors.arrow_flow import classify_arrow_page_io
 from pdf_parser.processors.relation_extractor import (
     merge_adjacent_box_elements,
     organize_relation,
@@ -262,7 +263,7 @@ def _document_trace_index(
 
     page_indexes: list[dict[str, Any]] = []
     transfers: list[dict[str, Any]] = []
-    entity_fields = ("id", "type", "page", "bbox", "title", "descriptions")
+    entity_fields = ("id", "type", "page", "bbox", "title", "descriptions", "page_io")
     transfer_fields = (
         "source_page",
         "source_component",
@@ -972,6 +973,7 @@ def _extract_page_info(
         )
         relations = organize_relation(page_result)
         page_result.update(handle_relations(page_result, relations))
+        classify_arrow_page_io(page_result)
         element_to_component = {
             element_id: component["id"]
             for component in page_result["components"]

@@ -45,6 +45,7 @@ class DiagramConfig:
     # EPLAN's nominal break mark is an 8.018 pt diagonal after conversion.
     wire_terminal_diagonal_max_length_pt: float = 10.0
     arrow_removal_boundary_tolerance_pt: float = 0.1
+    arrow_flow_min_cosine: float = 0.5
 
 
 @dataclass(frozen=True)

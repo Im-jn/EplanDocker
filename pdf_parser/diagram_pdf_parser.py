@@ -17,6 +17,7 @@ from pdf_parser.processors.diagram_extractor import (
     extract_diagram,
     merge_diagram_results,
 )
+from pdf_parser.processors.arrow_flow import classify_arrow_page_io
 from pdf_parser.processors.hyperlink_extractor import (
     attach_hyperlink_targets,
     attach_hyperlinks,
@@ -359,6 +360,7 @@ def parse_diagram_pdf(
             )
             relations = organize_relation(in_page_info)
             in_page_info.update(handle_relations(in_page_info, relations))
+            classify_arrow_page_io(in_page_info)
             element_to_component = {
                 element_id: component["id"]
                 for component in in_page_info["components"]
