@@ -116,6 +116,22 @@ def test_keeps_only_symbol_records() -> None:
     assert parsed["pages"][2]["diagram"] == {"records": [{"symbol": 0}]}
 
 
+def test_moves_legacy_crosspage_links_into_diagram() -> None:
+    pdf_info = _pdf_info()
+    diagram = pdf_info["pages"][1]["diagram"]
+    pdf_info["pages"][1]["crosspage_relations"] = {
+        "hyperlinks": diagram.pop("hyperlinks"),
+        "transfers": [],
+    }
+    pdf_info["crosspage_relations"] = {"hyperlinks": [], "transfers": []}
+
+    parsed = build_parsed_json(pdf_info)
+
+    assert "crosspage_relations" not in parsed
+    assert "crosspage_relations" not in parsed["pages"][1]
+    assert parsed["pages"][1]["diagram"]["hyperlinks"][0]["id"] == "source/p1/hyperlink/0"
+
+
 def test_does_not_mutate_full_parser_output() -> None:
     pdf_info = _pdf_info()
     build_parsed_json(pdf_info, filename="plan.pdf")

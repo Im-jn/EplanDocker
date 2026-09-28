@@ -35,7 +35,11 @@ def build_parsed_json(
     document = dict(pdf_info.get("document", {}))
     if filename is not None:
         document["filename"] = filename
-    parsed = {key: value for key, value in pdf_info.items() if key != "pages"}
+    parsed = {
+        key: value
+        for key, value in pdf_info.items()
+        if key not in {"pages", "crosspage_relations"}
+    }
     parsed["document"] = document
     if isinstance(pdf_info.get("symbol_overview"), Mapping):
         parsed["symbol_overview"] = {
@@ -53,6 +57,16 @@ def global_id(filename: str, page: Any, kind: str, local_id: Any) -> str:
     return f"{Path(filename).stem}/p{int(page)}/{kind}/{local_id}"
 
 
+def id_kind(item_id: str) -> str:
+    """Return the entity or edge kind encoded in a global id."""
+    return item_id.rsplit("/", 2)[-2]
+
+
+def id_local_part(item_id: str) -> str:
+    """Return the page-local id or index encoded in a global id."""
+    return item_id.rsplit("/", 1)[-1]
+
+
 def save_parsed_json(parsed: dict[str, Any], output_directory: str | Path) -> Path:
     """Save built parsed JSON as ``<output_directory>/<pdf stem>.json``."""
     stem = Path(str(parsed["document"]["filename"])).stem
@@ -60,11 +74,18 @@ def save_parsed_json(parsed: dict[str, Any], output_directory: str | Path) -> Pa
 
 
 def _page(page_record: Mapping[str, Any], filename: str, page_num: int) -> dict[str, Any]:
-    page = dict(page_record)
+    page = {key: value for key, value in page_record.items() if key != "crosspage_relations"}
     if isinstance(page.get("info_table"), Mapping):
         page["info_table"] = _info_table(page["info_table"])
     if isinstance(page.get("diagram"), Mapping):
-        page["diagram"] = _diagram(page["diagram"], filename, page_num)
+        diagram = dict(page["diagram"])
+        # Results parsed before links moved into ``diagram`` keep them beside it.
+        legacy_links = page_record.get("crosspage_relations")
+        if isinstance(legacy_links, Mapping):
+            for collection in LINK_COLLECTIONS:
+                if legacy_links.get(collection):
+                    diagram.setdefault(collection, list(legacy_links[collection]))
+        page["diagram"] = _diagram(diagram, filename, page_num)
     return page
 
 

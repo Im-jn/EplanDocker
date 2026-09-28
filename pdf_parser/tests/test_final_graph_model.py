@@ -278,8 +278,10 @@ def test_diagram_serializer_centralizes_shapes_and_slims_graph_entities() -> Non
         "id", "type", "page", "bbox", "title", "descriptions", "elements",
     }
     for collection in ("components", "endpoints", "wires", "nets", "groups"):
-        assert all(set(entity) == expected_entity_fields for entity in diagram[collection])
+        fields = expected_entity_fields | ({"subclass"} if collection == "components" else set())
+        assert all(set(entity) == fields for entity in diagram[collection])
         assert all(entity["page"] == 12 for entity in diagram[collection])
+    assert diagram["components"][0]["subclass"] == "symbol"
     assert [element["id"] for element in diagram["elements"]] == list(range(4))
     assert diagram["components"][0]["elements"] == [0]
     assert diagram["wires"][0]["elements"] == [1]
@@ -291,6 +293,21 @@ def test_diagram_serializer_centralizes_shapes_and_slims_graph_entities() -> Non
     assert all(element["type"] != "unassigned" for element in diagram["elements"])
     assert diagram["remaining_text"][0]["nearby"] == [3]
     assert all("shape" not in entity for collection in ("components", "endpoints", "wires", "nets", "groups") for entity in diagram[collection])
+
+
+def test_component_subclass_is_single_element_type_or_assembly() -> None:
+    def element(element_id: int, element_type: str) -> dict:
+        return {"id": element_id, "type": element_type, "shape": [], "bbox": (0, 0, 1, 1)}
+
+    diagram = serialize_diagram({
+        "elements": [element(0, "arrow"), element(1, "box"), element(2, "symbol")],
+        "components": [
+            {"id": 0, "bbox": (0, 0, 1, 1), "element_ids": [0]},
+            {"id": 1, "bbox": (0, 0, 1, 1), "element_ids": [1, 2]},
+        ],
+    }, page=1)
+
+    assert [component["subclass"] for component in diagram["components"]] == ["arrow", "assembly"]
 
 
 def test_remaining_text_nearby_uses_top_five_and_nearest_distance_band() -> None:

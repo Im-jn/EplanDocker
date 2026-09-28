@@ -18,8 +18,7 @@ from eplan_runtime import (
 )
 from pdf_parser.diagram_pdf_parser import parse_diagram_pdf, save_pdf_info
 from pdf_parser.llm_judger import LLMConfig
-from pdf_parser.parsed_graph import save_parsed_graph
-from pdf_parser.parsed_json import build_parsed_json, save_parsed_json
+from pdf_parser.parsed_graph import export_parsed_outputs
 
 
 API_URL = os.getenv("EPLAN_API_URL", "http://api:8000").rstrip("/")
@@ -99,9 +98,13 @@ def process_job(job: dict[str, Any]) -> None:
             show_page_progress=False,
         )
         saved_path = save_pdf_info(pdf_info, result_path)
-        parsed = build_parsed_json(pdf_info, filename=job["original_filename"])
-        save_parsed_json(parsed, PARSED_JSON_ROOT)
-        save_parsed_graph(parsed, PARSED_GRAPH_PATH)
+        export_parsed_outputs(
+            pdf_info,
+            filename=job["original_filename"],
+            parsed_json_directory=PARSED_JSON_ROOT,
+            graph_path=PARSED_GRAPH_PATH,
+            document_id=document_id,
+        )
         checkpoint_path.unlink(missing_ok=True)
         api_request(
             "POST",

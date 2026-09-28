@@ -5,8 +5,7 @@ from pathlib import Path
 
 from pdf_parser.diagram_pdf_parser import parse_diagram_pdf, save_pdf_info
 from pdf_parser.llm_judger import LLMConfig
-from pdf_parser.parsed_graph import save_parsed_graph
-from pdf_parser.parsed_json import build_parsed_json, save_parsed_json
+from pdf_parser.parsed_graph import export_parsed_outputs
 from pdf_parser.utils import resolve_repo_relative
 
 
@@ -119,11 +118,14 @@ def main() -> None:
         if checkpoint_path.is_file():
             checkpoint_path.unlink()
         print(f"[pdf_parser] Saved extraction result to {output_path}", flush=True)
-        parsed = build_parsed_json(pdf_info, filename=Path(args.pdf_file_path).name)
-        parsed_json_path = save_parsed_json(parsed, args.parsed_json_dir)
-        print(f"[pdf_parser] Saved parsed JSON to {parsed_json_path}", flush=True)
         graph_path = resolve_repo_relative(args.parsed_graph_file)
-        graph_counts = save_parsed_graph(parsed, graph_path)
+        parsed_json_path, graph_counts = export_parsed_outputs(
+            pdf_info,
+            filename=Path(args.pdf_file_path).name,
+            parsed_json_directory=args.parsed_json_dir,
+            graph_path=graph_path,
+        )
+        print(f"[pdf_parser] Saved parsed JSON to {parsed_json_path}", flush=True)
         print(
             f"[pdf_parser] Saved {graph_counts['nodes']} nodes and "
             f"{graph_counts['edges']} edges to {graph_path}",

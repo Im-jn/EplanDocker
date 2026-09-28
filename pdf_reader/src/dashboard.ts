@@ -288,6 +288,8 @@ function renderJobs(jobs: Job[]): void {
   jobsRoot.innerHTML = jobs.map((job) => {
     const publishing = job.status === 'succeeded' && !job.document_ready
     const progress = publishing ? job.reader_progress : job.progress
+    // Reader preparation only starts when the document is opened, so there is no progress to show yet.
+    const awaitingReader = job.status === 'succeeded' && job.reader_status === 'pending'
     const message = publishing
       ? (job.reader_error || job.reader_message || 'Open the reader to prepare this document')
       : (job.error || job.message || '')
@@ -297,7 +299,7 @@ function renderJobs(jobs: Job[]): void {
     return `
     <article class="task-row">
       <div class="task-primary"><strong>${escapeHtml(job.original_filename)}</strong><span>${escapeHtml(statusLabel(job))} · ${escapeHtml(job.stage)}</span></div>
-      <div class="task-progress"><div class="progress-track" role="progressbar" aria-label="${escapeHtml(job.original_filename)} progress" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div style="width:${progress}%"></div></div><span>${progress}%</span></div>
+      <div class="task-progress">${awaitingReader ? '' : `<div class="progress-track" role="progressbar" aria-label="${escapeHtml(job.original_filename)} progress" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div style="width:${progress}%"></div></div><span>${progress}%</span>`}</div>
       <p>${escapeHtml(message)}</p>
       <div class="task-actions">
         ${canPause ? `<button type="button" data-job-action="pause" data-job-id="${job.id}">Pause</button>` : ''}
@@ -353,7 +355,7 @@ function renderDocuments(documents: Job[]): void {
       <small>${document.source_available
         ? (document.document_ready ? 'Reader ready' : escapeHtml(document.reader_message || 'Open to prepare reader data'))
         : 'Source PDF deleted · parsed result retained'}</small>
-      <div class="document-progress" role="progressbar" aria-valuenow="${document.reader_progress}" aria-valuemin="0" aria-valuemax="100"><div style="width:${document.reader_progress}%"></div></div>
+      ${document.reader_status === 'pending' ? '' : `<div class="document-progress" role="progressbar" aria-valuenow="${document.reader_progress}" aria-valuemin="0" aria-valuemax="100"><div style="width:${document.reader_progress}%"></div></div>`}
       <span class="document-links"><a href="${document.result_url}/download">Result JSON</a>${document.source_available ? ` <a href="/viewer/${document.document_id}">Open reader</a>` : ''}</span>
     </div>
   `).join('')

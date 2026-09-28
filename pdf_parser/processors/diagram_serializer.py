@@ -30,6 +30,8 @@ def serialize_diagram(result: dict[str, Any], *, page: int) -> dict[str, Any]:
         )
         for item in result.get("components", [])
     ]
+    for component in components:
+        component["subclass"] = component_subclass(component["elements"], elements)
 
     wire_element_by_id: dict[Any, int] = {}
     wires = []
@@ -125,6 +127,13 @@ def serialize_diagram(result: dict[str, Any], *, page: int) -> dict[str, Any]:
         "remaining_vectors": remaining_vectors,
         "remaining_text": remaining_text,
     }
+
+
+def component_subclass(element_ids: list[int], elements: list[dict[str, Any]]) -> str:
+    """Return the only element's type, or ``assembly`` for multi-element components."""
+    if len(element_ids) == 1:
+        return str(elements[element_ids[0]]["type"])
+    return "assembly"
 
 
 def _remaining_text_with_nearby(

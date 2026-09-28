@@ -58,6 +58,8 @@ storage/
 │  └─ <document_id>/source.pdf
 ├─ output/
 │  ├─ pdf_parsing_result/<document_id>/result.json
+│  ├─ parsed_json/<pdf name>.json
+│  ├─ parsed_graph.sqlite3
 │  └─ reader_data/<document_id>/
 ├─ cache/
 │  ├─ entity/
@@ -188,7 +190,7 @@ curl.exe http://localhost:8000/api/v1/parsing-jobs/JOB_ID/result
 curl.exe -OJ http://localhost:8000/api/v1/parsing-jobs/JOB_ID/result/download
 ```
 
-The parsing result can be downloaded as soon as the job reaches `succeeded`; `reader_status` may still be `pending` or `building`.
+The parsing result can be downloaded as soon as the job reaches `succeeded`; `reader_status` may still be `pending` or `building`. By default it is the compact parsed JSON meant for other work packages; use `result?full=true` or `result/download?full=true` for the internal parser output.
 
 Pause, resume, cancel, or permanently delete a job:
 
@@ -227,16 +229,43 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | Resume a paused or failed job from its checkpoint |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/cancel` | Request job cancellation |
 | `DELETE` | `/api/v1/parsing-jobs/{job_id}` | Delete a job and its results while keeping the cached PDF |
-| `GET` | `/api/v1/parsing-jobs/{job_id}/result` | Get the canonical parsing result |
+| `GET` | `/api/v1/parsing-jobs/{job_id}/result` | Get the compact parsed JSON; add `?full=true` for the internal parser output |
 | `GET` | `/api/v1/cached-pdfs` | List PDFs cached in storage |
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | Reprocess a cached PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | Delete a cached PDF and unfinished tasks while retaining completed results |
 | `GET` | `/api/v1/documents` | List parsed documents and their reader status |
-| `POST` | `/api/v1/documents/{document_id}/trace` | Run document-level n-hop tracing from a component or wire |
+| `POST` | `/api/v1/trace` | Run n-hop tracing over the parsed graph, located by global id or filename |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | Start reader-data preparation on demand |
 | `POST` | `/api/v1/queries` | Query a completed document |
 
 `/internal/v1/worker/*` is reserved for the worker on the internal Compose network and should not be exposed through the reverse proxy.
+
+## Public Outputs and Tracing
+
+Besides the internal `result.json`, every parsed document produces two outputs for other work packages:
+
+- `parsed_json/<pdf name>.json`: a compact JSON without elements, vectors, or intermediate table data.
+- `parsed_graph.sqlite3`: a node/edge graph shared by all documents. Nodes are components, endpoints, wires, nets, and groups; edges are relations, hyperlinks, and transfers.
+
+Both use the same global ids: `<pdf name>/p<page>/<kind>/<page-local id or index>`, for example `Plan A/p12/component/4`. Hyperlinks and transfers without a resolved component stay in the JSON only.
+
+Every component carries a `subclass`: the type of its only element (such as `symbol`, `box`, or `arrow`), or `assembly` when it consists of several elements. The graph's `nodes.subclass` column stores the same value for components and repeats the kind (`wire`, `endpoint`, `net`, `group`) for every other node.
+
+`POST /api/v1/trace` reads the graph. Callers only need the PDF filename they submitted, never the internal `document_id`:
+
+```json
+{
+  "start": {"id": "Plan A/p12/component/4"},
+  "max_hops": 2,
+  "skip": ["endpoint", "net", "group"],
+  "response_format": "subgraph"
+}
+```
+
+- `start` is a global id or `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`; `file` may omit `.pdf`.
+- Reaching a kind listed in `skip` (`endpoint`, `net`, `group`, `wire`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers are edges between components, so crossing one costs a hop.
+- Each node is reached once, so loops are never expanded twice.
+- `open_endpoints` lists endpoints with one traced and one untraced side, i.e. where the trace stopped.
 
 ## Import an Existing Parsing Result
 
@@ -251,6 +280,13 @@ python -m scripts.import_completed_document `
 The script derives a stable `document_id` from the PDF SHA-256 hash, moves both files into the canonical storage layout, and registers the job as `succeeded / reader pending`. Reader data is generated on demand when a user first opens the document.
 
 The existing `TE2_Sealer.pdf` and its parsing result have already been registered this way and do not need to be resubmitted for parsing.
+
+Documents parsed before the public outputs and graph existed can be exported once:
+
+```powershell
+python -m scripts.backfill_parsed_outputs            # every completed document
+python -m scripts.backfill_parsed_outputs DOC_ID     # selected documents
+```
 
 ## Local Development
 

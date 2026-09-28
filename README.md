@@ -57,6 +57,8 @@ storage/
 │  └─ <document_id>/source.pdf
 ├─ output/
 │  ├─ pdf_parsing_result/<document_id>/result.json
+│  ├─ parsed_json/<PDF 文件名>.json
+│  ├─ parsed_graph.sqlite3
 │  └─ reader_data/<document_id>/
 ├─ cache/
 │  ├─ entity/
@@ -187,7 +189,7 @@ curl.exe http://localhost:8000/api/v1/parsing-jobs/JOB_ID/result
 curl.exe -OJ http://localhost:8000/api/v1/parsing-jobs/JOB_ID/result/download
 ```
 
-只要任务状态成为 `succeeded`，parsing result 就可以下载；`reader_status` 可能仍为 `pending` 或 `building`。
+只要任务状态成为 `succeeded`，parsing result 就可以下载；`reader_status` 可能仍为 `pending` 或 `building`。默认返回的是给其他 work package 使用的精简版 parsed JSON；内部完整结果可用 `result?full=true` 或 `result/download?full=true` 获取。
 
 暂停、继续、取消或永久删除任务：
 
@@ -226,16 +228,43 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/parsing-jobs/{job_id}/resume` | 继续暂停或失败的任务（复用 checkpoint） |
 | `POST` | `/api/v1/parsing-jobs/{job_id}/cancel` | 请求取消任务 |
 | `DELETE` | `/api/v1/parsing-jobs/{job_id}` | 删除任务及其结果，保留缓存 PDF |
-| `GET` | `/api/v1/parsing-jobs/{job_id}/result` | 获取规范 parsing result |
+| `GET` | `/api/v1/parsing-jobs/{job_id}/result` | 获取精简版 parsed JSON；加 `?full=true` 获取内部完整结果 |
 | `GET` | `/api/v1/cached-pdfs` | 列出 storage 中缓存的 PDF |
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | 重新处理缓存 PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 和未完成任务，保留已完成任务及结果 |
 | `GET` | `/api/v1/documents` | 列出已解析文档及其 reader 状态 |
-| `POST` | `/api/v1/documents/{document_id}/trace` | 从 component 或 wire 开始执行文档级 n-hop tracing |
+| `POST` | `/api/v1/trace` | 基于 parsed graph 执行 n-hop tracing，按全局 id 或文件名定位 |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | 按需启动 reader-data 预处理 |
 | `POST` | `/api/v1/queries` | 查询已完成文档 |
 
 `/internal/v1/worker/*` 只供 Compose 内部网络中的 worker 使用，不应通过反向代理暴露。
+
+## 对外输出与 tracing
+
+每个文档解析完成后，除内部的 `result.json` 外还会生成两份供其他 work package 使用的输出：
+
+- `parsed_json/<PDF 文件名>.json`：去掉 elements、矢量和表格中间结果的精简 JSON。
+- `parsed_graph.sqlite3`：所有文档共用的节点/边图库。节点是 components、endpoints、wires、nets、groups，边是 relations、hyperlinks、transfers。
+
+两者使用同一套全局 id：`<PDF 文件名>/p<页>/<kind>/<页内 id 或序号>`，例如 `Plan A/p12/component/4`。未关联上 component 的 hyperlink/transfer 只保留在 JSON 中。
+
+每个 component 带有 `subclass`：只由一个 element 组成时取该 element 的类型（如 `symbol`、`box`、`arrow`），由多个 element 组成时为 `assembly`。图库的 `nodes.subclass` 列对 component 存同样的值，对其他节点直接存 kind（`wire`、`endpoint`、`net`、`group`）。
+
+`POST /api/v1/trace` 基于图库计算，调用方只需要知道自己提交的 PDF 文件名，不需要内部的 `document_id`：
+
+```json
+{
+  "start": {"id": "Plan A/p12/component/4"},
+  "max_hops": 2,
+  "skip": ["endpoint", "net", "group"],
+  "response_format": "subgraph"
+}
+```
+
+- `start` 可以是全局 id，也可以是 `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`；`file` 带不带 `.pdf` 均可。
+- 到达 `skip` 中的类型（可选 `endpoint`、`net`、`group`、`wire`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 是 component 之间的边，穿过它计一跳。
+- 每个节点只会被到达一次，因此回环不会重复展开。
+- 返回中的 `open_endpoints` 是一端已追踪、另一端尚未追踪的 endpoint，即 tracing 停下的位置。
 
 ## 导入已有解析结果
 
@@ -250,6 +279,13 @@ python -m scripts.import_completed_document `
 脚本按 PDF SHA-256 生成稳定的 `document_id`，把文件移动到规范 storage 目录，并将任务登记为 `succeeded / reader pending`。用户首次打开该文档时会按需生成 reader-data。
 
 当前已有的 `TE2_Sealer.pdf` 及其 parsing result 已按此方式登记，无需再次提交解析任务。
+
+在对外输出和图库出现之前解析的文档，可以一次性补生成：
+
+```powershell
+python -m scripts.backfill_parsed_outputs            # 所有已完成文档
+python -m scripts.backfill_parsed_outputs DOC_ID     # 指定文档
+```
 
 ## 本地开发
 

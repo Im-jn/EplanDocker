@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -27,6 +28,8 @@ from api_service.logging_config import (
 from eplan_runtime import (
     INTERNAL_TOKEN,
     MAX_UPLOAD_BYTES,
+    PARSED_GRAPH_PATH,
+    PARSED_JSON_ROOT,
     PDF_ROOT,
     READER_ROOT,
     RESULT_ROOT,
@@ -34,22 +37,33 @@ from eplan_runtime import (
     ensure_storage,
 )
 from api_service.publisher import request_publish
-from pdf_parser.document_trace import TraceStartNotFoundError, trace_document_file
+from pdf_parser.document_trace import (
+    DEFAULT_SKIP,
+    TraceDocumentNotFoundError,
+    TraceStartNotFoundError,
+    trace_document as trace_parsed_graph,
+)
 from pdf_parser.query_engine import query as handle_query
 
 
 logger = get_logger("api")
 
 
-class DocumentTraceStart(BaseModel):
-    page: int = Field(ge=1)
-    kind: Literal["component", "wire"]
+class TraceStart(BaseModel):
+    """A global node id, or the submitted PDF filename with ``page``, ``kind`` and page-local ``id``."""
+
     id: int | str
+    file: str | None = None
+    page: int | None = Field(default=None, ge=1)
+    kind: Literal["component", "wire", "endpoint", "net", "group"] | None = None
 
 
-class DocumentTraceRequest(BaseModel):
-    start: DocumentTraceStart
+class TraceRequest(BaseModel):
+    start: TraceStart
     max_hops: int = Field(default=1, ge=0, le=50)
+    skip: list[Literal["endpoint", "net", "group", "wire"]] = Field(
+        default_factory=lambda: list(DEFAULT_SKIP)
+    )
     direction: Literal["any"] = "any"
     response_format: Literal["subgraph", "hops"] = "subgraph"
 
@@ -535,27 +549,38 @@ def delete_parsing_job(job_id: str) -> JSONResponse:
 
 
 @app.get("/api/v1/parsing-jobs/{job_id}/result")
-def read_parsing_result(job_id: str, download: bool = False) -> FileResponse:
+def read_parsing_result(job_id: str, download: bool = False, full: bool = False) -> FileResponse:
+    """Serve the public parsed JSON, or the internal parser output when ``full`` is set."""
     job = database.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
     if not job["result_available"]:
         raise HTTPException(409, f"Result is not available; job status is {job['status']}")
-    result_path = RESULT_ROOT / job["document_id"] / "result.json"
-    if not result_path.is_file():
-        raise HTTPException(500, "Recorded parsing result is missing")
+    stem = Path(job["original_filename"]).stem
+    if full:
+        result_path = RESULT_ROOT / job["document_id"] / "result.json"
+        if not result_path.is_file():
+            raise HTTPException(500, "Recorded parsing result is missing")
+    else:
+        result_path = PARSED_JSON_ROOT / f"{stem}.json"
+        if not result_path.is_file():
+            raise HTTPException(
+                409,
+                "Parsed JSON is missing for this document; "
+                "run python -m scripts.backfill_parsed_outputs",
+            )
     disposition = "attachment" if download else "inline"
     return FileResponse(
         result_path,
         media_type="application/json",
-        filename=f"{Path(job['original_filename']).stem}.json" if download else None,
+        filename=(f"{stem}.full.json" if full else f"{stem}.json") if download else None,
         content_disposition_type=disposition,
     )
 
 
 @app.get("/api/v1/parsing-jobs/{job_id}/result/download")
-def download_parsing_result(job_id: str) -> FileResponse:
-    return read_parsing_result(job_id, download=True)
+def download_parsing_result(job_id: str, full: bool = False) -> FileResponse:
+    return read_parsing_result(job_id, download=True, full=full)
 
 
 @app.get("/api/v1/documents")
@@ -703,29 +728,34 @@ def read_document(document_id: str) -> dict[str, Any]:
     return _job_response(job)
 
 
-@app.post("/api/v1/documents/{document_id}/trace")
-def trace_document(document_id: str, request: DocumentTraceRequest) -> dict[str, Any]:
-    job = database.get_document(document_id)
-    if job is None:
-        raise HTTPException(404, "Completed document not found")
-    _, result_directory, _ = _document_storage_paths(document_id)
-    result_path = result_directory / "result.json"
-    if not result_path.is_file():
-        raise HTTPException(500, "Recorded parsing result is missing")
+@app.post("/api/v1/trace")
+def trace(request: TraceRequest) -> dict[str, Any]:
+    """Trace by global id or by submitted filename, without internal document ids."""
+    start = request.start
+    local_fields = (start.file, start.page, start.kind)
+    local_start = any(field is not None for field in local_fields)
+    if local_start and any(field is None for field in local_fields):
+        raise HTTPException(422, "start.file, start.page and start.kind must be given together")
     try:
-        traced = trace_document_file(
-            result_path,
-            start_page=request.start.page,
-            start_kind=request.start.kind,
-            start_id=request.start.id,
+        return trace_parsed_graph(
+            PARSED_GRAPH_PATH,
+            start_id=None if local_start else str(start.id),
+            file=start.file,
+            start_page=start.page,
+            start_kind=start.kind,
+            start_local_id=start.id if local_start else None,
             max_hops=request.max_hops,
+            skip=request.skip,
             response_format=request.response_format,
         )
+    except TraceDocumentNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
     except TraceStartNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(500, "Recorded parsing result is unreadable") from exc
-    return {"document_id": document_id, **traced}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(500, "Parsed graph database is unreadable") from exc
 
 
 @app.post("/api/v1/documents/{document_id}/prepare", status_code=202)

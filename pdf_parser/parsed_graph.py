@@ -16,14 +16,20 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from pdf_parser.parsed_json import ENTITY_COLLECTIONS, LINK_COLLECTIONS
+from pdf_parser.parsed_json import (
+    ENTITY_COLLECTIONS,
+    LINK_COLLECTIONS,
+    build_parsed_json,
+    save_parsed_json,
+)
 
 
-NODE_COLUMNS = {"id", "type", "page", "bbox", "title", "descriptions"}
+NODE_COLUMNS = {"id", "type", "subclass", "page", "bbox", "title", "descriptions"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     filename TEXT PRIMARY KEY,
+    document_id TEXT,
     page_count INTEGER
 );
 CREATE TABLE IF NOT EXISTS nodes (
@@ -31,6 +37,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     filename TEXT NOT NULL REFERENCES documents(filename) ON DELETE CASCADE,
     page INTEGER NOT NULL,
     kind TEXT NOT NULL,
+    subclass TEXT,
     x0 REAL,
     y0 REAL,
     x1 REAL,
@@ -63,30 +70,71 @@ def connect_parsed_graph(database_path: str | Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.executescript(SCHEMA)
+    # Databases created before documents were linked to API document ids.
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
+    if "document_id" not in columns:
+        connection.execute("ALTER TABLE documents ADD COLUMN document_id TEXT")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS documents_document_id ON documents (document_id)"
+    )
+    # Databases created before nodes carried a subclass; components stay NULL
+    # until their document is exported again.
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(nodes)")}
+    if "subclass" not in columns:
+        connection.execute("ALTER TABLE nodes ADD COLUMN subclass TEXT")
+        with connection:
+            connection.execute("UPDATE nodes SET subclass = kind WHERE kind != 'component'")
+    connection.execute("CREATE INDEX IF NOT EXISTS nodes_subclass ON nodes (kind, subclass)")
     return connection
 
 
-def save_parsed_graph(parsed: Mapping[str, Any], database_path: str | Path) -> dict[str, int]:
-    """Replace one document's nodes and edges, keyed by its PDF filename."""
+def export_parsed_outputs(
+    pdf_info: Mapping[str, Any],
+    *,
+    filename: str,
+    parsed_json_directory: str | Path,
+    graph_path: str | Path,
+    document_id: str | None = None,
+) -> tuple[Path, dict[str, int]]:
+    """Write the public parsed JSON and its graph rows for one parsed document."""
+    parsed = build_parsed_json(pdf_info, filename=filename)
+    json_path = save_parsed_json(parsed, parsed_json_directory)
+    return json_path, save_parsed_graph(parsed, graph_path, document_id=document_id)
+
+
+def save_parsed_graph(
+    parsed: Mapping[str, Any],
+    database_path: str | Path,
+    *,
+    document_id: str | None = None,
+) -> dict[str, int]:
+    """Replace one document's nodes and edges, keyed by its PDF filename.
+
+    ``document_id`` links the rows to an API document so tracing can find them.
+    """
     document = parsed.get("document", {})
     filename = str(document["filename"])
     with closing(connect_parsed_graph(database_path)) as connection, connection:
-        connection.execute("DELETE FROM documents WHERE filename = ?", (filename,))
         connection.execute(
-            "INSERT INTO documents (filename, page_count) VALUES (?, ?)",
-            (filename, document.get("page_count")),
+            "DELETE FROM documents WHERE filename = ? OR document_id = ?",
+            (filename, document_id),
+        )
+        connection.execute(
+            "INSERT INTO documents (filename, document_id, page_count) VALUES (?, ?, ?)",
+            (filename, document_id, document.get("page_count")),
         )
         node_ids: set[str] = set()
         for page, kind, entity in _nodes(parsed):
             bbox = entity.get("bbox") or {}
             connection.execute(
-                "INSERT INTO nodes (id, filename, page, kind, x0, y0, x1, y1, "
-                "title, descriptions, properties) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO nodes (id, filename, page, kind, subclass, x0, y0, x1, y1, "
+                "title, descriptions, properties) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entity["id"],
                     filename,
                     page,
                     kind,
+                    entity.get("subclass") if kind == "component" else kind,
                     bbox.get("x0"),
                     bbox.get("y0"),
                     bbox.get("x1"),

@@ -9,7 +9,14 @@ from pathlib import Path
 import fitz
 
 from api_service import database
-from eplan_runtime import PDF_ROOT, RESULT_ROOT
+from eplan_runtime import (
+    PARSED_GRAPH_PATH,
+    PARSED_JSON_ROOT,
+    PDF_ROOT,
+    RESULT_ROOT,
+)
+from pdf_parser.diagram_pdf_parser import load_pdf_info
+from pdf_parser.parsed_graph import export_parsed_outputs
 
 
 def sha256_file(path: Path) -> str:
@@ -67,6 +74,13 @@ def import_completed_document(pdf_path: Path, result_path: Path) -> dict[str, ob
             }
         )
         database.finish_job(job_id, status="succeeded", result_path=str(target_result))
+    export_parsed_outputs(
+        load_pdf_info(target_result),
+        filename=original_filename,
+        parsed_json_directory=PARSED_JSON_ROOT,
+        graph_path=PARSED_GRAPH_PATH,
+        document_id=document_id,
+    )
     return database.get_job(job_id) or {}
 
 
