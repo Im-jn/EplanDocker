@@ -26,6 +26,7 @@ from api_service.logging_config import (
     reset_request_id,
 )
 from eplan_runtime import (
+    GIT_COMMIT,
     INTERNAL_TOKEN,
     MAX_UPLOAD_BYTES,
     PARSED_GRAPH_PATH,
@@ -403,7 +404,7 @@ async def log_request(request: Request, call_next: Any) -> Response:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "commit": GIT_COMMIT}
 
 
 @app.post("/api/v1/parsing-jobs", status_code=202)

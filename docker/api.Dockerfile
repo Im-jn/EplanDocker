@@ -18,5 +18,9 @@ RUN useradd --create-home --uid 10001 eplan \
     && chown -R eplan:eplan /app
 USER eplan
 
+ARG GIT_COMMIT=unknown
+ENV EPLAN_GIT_COMMIT=$GIT_COMMIT
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
+
 EXPOSE 8000
 CMD ["uvicorn", "api_service.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

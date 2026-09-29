@@ -89,6 +89,16 @@ API 与 worker 使用的内部 token 会在首次启动时自动生成到 `stora
 docker compose up --build
 ```
 
+在 Linux 服务器上更新代码后，推荐用 `scripts/deploy.sh` 重新构建并启动。它会把当前 git commit 写入所有镜像（有未提交改动时带 `-dirty` 后缀），无 docker 权限时自动使用 `sudo`：
+
+```bash
+git pull
+scripts/deploy.sh
+curl http://localhost:8000/health   # {"status":"ok","commit":"<commit>"}
+```
+
+任务面板标题上方也会显示 `build <commit>`，与 `git log -1` 一致即说明运行的是最新代码。
+
 启动后可访问：
 
 - 任务看板：`http://localhost:8080/tasks`

@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from eplan_runtime import (
+    GIT_COMMIT,
     INTERNAL_TOKEN,
     PARSED_GRAPH_PATH,
     PARSED_JSON_ROOT,
@@ -132,7 +133,7 @@ def process_job(job: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    print(f"[worker] Polling {API_URL}", flush=True)
+    print(f"[worker] Commit {GIT_COMMIT}; polling {API_URL}", flush=True)
     while True:
         try:
             job = api_request("POST", "/internal/v1/worker/jobs/claim", {})

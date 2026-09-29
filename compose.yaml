@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     environment:
       EPLAN_STORAGE_ROOT: /app/storage
       EPLAN_MAX_UPLOAD_BYTES: ${EPLAN_MAX_UPLOAD_BYTES:-1073741824}
@@ -26,6 +28,8 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     environment:
       EPLAN_STORAGE_ROOT: /app/storage
       EPLAN_API_URL: http://api:8000
@@ -49,6 +53,8 @@ services:
     build:
       context: .
       dockerfile: docker/frontend.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     ports:
       - "8080:80"
     depends_on:

@@ -90,6 +90,16 @@ Start all three services:
 docker compose up --build
 ```
 
+After updating the code on a Linux server, rebuild with `scripts/deploy.sh`. It bakes the current git commit into every image (suffixed `-dirty` when there are uncommitted changes) and uses `sudo` only when Docker is not otherwise accessible:
+
+```bash
+git pull
+scripts/deploy.sh
+curl http://localhost:8000/health   # {"status":"ok","commit":"<commit>"}
+```
+
+The task dashboard also shows `build <commit>` above its title; if it matches `git log -1`, the running stack is up to date.
+
 After startup, open:
 
 - Task dashboard: `http://localhost:8080/tasks`

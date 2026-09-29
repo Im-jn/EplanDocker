@@ -63,7 +63,7 @@ if (!app) throw new Error('Missing #app')
 app.innerHTML = `
   <div class="dashboard-shell">
     <header class="dashboard-header">
-      <div><p class="dashboard-eyebrow">Eplan processing service</p><h1>Task dashboard</h1></div>
+      <div><p class="dashboard-eyebrow">Eplan processing service · build ${escapeHtml(import.meta.env.VITE_GIT_COMMIT ?? 'dev')}</p><h1>Task dashboard</h1></div>
       <nav aria-label="Primary navigation">
         <a class="dashboard-nav-link dashboard-reader-link" id="reader-link" href="/viewer">Open PDF reader →</a>
       </nav>

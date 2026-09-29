@@ -19,6 +19,8 @@ TEMP_ROOT = STORAGE_ROOT / "tmp"
 LOG_ROOT = STORAGE_ROOT / "logs"
 DATABASE_PATH = Path(os.getenv("EPLAN_DATABASE_PATH", STATE_ROOT / "jobs.sqlite3")).resolve()
 MAX_UPLOAD_BYTES = int(os.getenv("EPLAN_MAX_UPLOAD_BYTES", str(1024 * 1024 * 1024)))
+# Git commit baked into the Docker image at build time (see scripts/deploy.sh).
+GIT_COMMIT = os.getenv("EPLAN_GIT_COMMIT", "unknown")
 
 
 def _load_or_create_internal_token() -> str:
