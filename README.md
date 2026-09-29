@@ -256,13 +256,14 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 {
   "start": {"id": "Plan A/p12/component/4"},
   "max_hops": 2,
-  "skip": ["endpoint", "net", "group"],
+  "skip": ["endpoint", "net"],
   "response_format": "subgraph"
 }
 ```
 
 - `start` 可以是全局 id，也可以是 `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`；`file` 带不带 `.pdf` 均可。
-- 到达 `skip` 中的类型（可选 `endpoint`、`net`、`group`、`wire`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 是 component 之间的边，穿过它计一跳。
+- 到达 `skip` 中的类型（可选 `endpoint`、`net`、`wire`，默认 `endpoint`、`net`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 是 component 之间的边，穿过它计一跳。
+- group 只是把几个 component 框在一起，并不代表电气连接，所以 tracing 永远不经过 group，也不能从 group 出发。
 - 每个节点只会被到达一次，因此回环不会重复展开。
 - `direction` 默认为 `any`（不限方向）。设为 `downstream` 或 `upstream` 时，每一跳都朝本页 `page_io` 为 `output` 或 `input` 的 arrow component 前进：
   - 当前节点能通往这些 arrow 时，只沿通往它们的最短路径走；

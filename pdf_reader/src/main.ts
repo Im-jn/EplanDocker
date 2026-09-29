@@ -861,11 +861,9 @@ app.innerHTML = `
               </select>
               <span class="field-label">Skip</span>
               <details class="info-trace-skip">
-                <summary id="info-trace-skip-summary">Endpoint, Net, Group</summary>
+                <summary id="info-trace-skip-summary">Net</summary>
                 <div class="info-trace-skip-options" role="group" aria-label="Kinds passed through without counting a hop">
-                  <label><input type="checkbox" value="endpoint" checked />Endpoint</label>
                   <label><input type="checkbox" value="net" checked />Net</label>
-                  <label><input type="checkbox" value="group" checked />Group</label>
                   <label><input type="checkbox" value="wire" />Wire</label>
                 </div>
               </details>
@@ -886,7 +884,19 @@ app.innerHTML = `
               <button id="info-trace-forward" class="button" type="button" title="Add the next hop" disabled>Next →</button>
             </div>
             <p id="info-trace-status" class="muted small">Open this tab to load the document trace graph.</p>
-            <div id="info-trace-steps" class="info-trace-steps"></div>
+            <div id="info-trace-results" class="info-trace-results">
+              <div id="info-trace-ports" class="info-trace-steps"></div>
+              <div id="info-trace-steps" class="info-trace-steps"></div>
+            </div>
+            <div
+              id="info-trace-resize"
+              class="info-trace-resize-handle"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Drag to resize the trace list; double-click to reset"
+              title="Drag to resize · double-click to reset"
+              tabindex="0"
+            ></div>
           </div>
 
           <div id="tab-panel-source" class="inspector-tab-panel" role="tabpanel" hidden>
@@ -1128,6 +1138,9 @@ const infoTraceForwardBtn = mustQuery<HTMLButtonElement>('#info-trace-forward')
 const infoTraceDepth = mustQuery<HTMLSpanElement>('#info-trace-depth')
 const infoTraceStatus = mustQuery<HTMLParagraphElement>('#info-trace-status')
 const infoTraceSteps = mustQuery<HTMLDivElement>('#info-trace-steps')
+const infoTracePortsRoot = mustQuery<HTMLDivElement>('#info-trace-ports')
+const infoTraceResults = mustQuery<HTMLDivElement>('#info-trace-results')
+const infoTraceResizeHandle = mustQuery<HTMLDivElement>('#info-trace-resize')
 const infoTraceConfirmDialog = mustQuery<HTMLDialogElement>('#info-trace-confirm-dialog')
 const infoTraceConfirmSummary = mustQuery<HTMLParagraphElement>('#info-trace-confirm-summary')
 const infoTraceConfirmMeta = mustQuery<HTMLDivElement>('#info-trace-confirm-meta')
@@ -1369,11 +1382,21 @@ type InfoTraceNode = {
 type InfoTraceStep = {
   depth: number
   nodes: InfoTraceNode[]
+  // Skipped wires on the routes that reached this hop's nodes.
+  via: InfoTraceNode[]
   endpoints: Array<{ page: number; id: number | string }>
   nets: Array<{ page: number; id: number | string }>
-  selectedNodeKeys: string[]
-  // Keys of the previous hop's nodes that reached each node of this hop.
-  origins?: Record<string, string[]>
+}
+
+// An exit the trace can continue from: a free endpoint, a net with untraced
+// wires, or a transfer leaving a traced arrow for another page.
+type InfoTracePort = {
+  key: string
+  kind: 'endpoint' | 'net' | 'transfer'
+  page: number
+  id: string
+  sources: InfoTraceNode[]
+  targets: InfoTraceNode[]
 }
 
 type InfoTraceOpenEndpoint = {
@@ -1472,6 +1495,9 @@ let infoTraceIndexPromise: Promise<InfoTraceIndex | null> | null = null
 let infoTraceAdjacencyCache: { index: InfoTraceIndex; adjacency: Map<string, string[]> } | null = null
 // Per document and page, fetched once: each node's distance to the page's arrows.
 const infoTracePageStreams = new Map<string, Promise<InfoTracePageStream | null>>()
+let infoTracePortList: InfoTracePort[] = []
+let infoTraceSelectedPortKeys = new Set<string>()
+let infoTraceFocusedPortKey: string | null = null
 let infoTraceAllSteps: InfoTraceStep[] = []
 let infoTraceOpenEndpoints: InfoTraceOpenEndpoint[] = []
 let infoTraceResolvedEndpoints: Array<{ page: number; id: number | string }> = []
@@ -2834,6 +2860,11 @@ function setSelection(item: ReaderItem | null, pageData: PageData | null): void 
   }
   setInspectorTab('extract-info')
   if (!focusExtractInfoForReaderItem(item, pageData)) {
+    // The clicked item owns no extracted entity; drop the previous panel pick
+    // rather than leave it highlighted beside the new selection.
+    clearExtractVectorHighlights()
+    extractInfoResult.querySelectorAll('.is-search-selected')
+      .forEach((node) => node.classList.remove('is-search-selected'))
     extractJsonSearchStatus.textContent = extractInfoResultData
       ? 'The selected PDF item has no extracted component ownership.'
       : 'No parsing result is available for the selected PDF item.'
@@ -2908,6 +2939,15 @@ function setSelection(item: ReaderItem | null, pageData: PageData | null): void 
       .join('')
   }
 
+  syncSelectionClasses()
+}
+
+// A vector clicked in the viewer and an item picked in the Extract Info panel
+// both mean "the selected item", so a panel pick replaces the clicked vector's
+// highlight instead of letting it reappear on the next overlay render.
+function clearReaderSelection(): void {
+  if (activeSelectionId === null) return
+  activeSelectionId = null
   syncSelectionClasses()
 }
 
@@ -4750,6 +4790,9 @@ async function selectDocument(documentId: string): Promise<void> {
   infoTraceIndexPromise = null
   infoTraceAdjacencyCache = null
   infoTracePageStreams.clear()
+  infoTracePortList = []
+  infoTraceSelectedPortKeys = new Set()
+  infoTraceFocusedPortKey = null
   infoTraceAllSteps = []
   infoTraceOpenEndpoints = []
   infoTraceResolvedEndpoints = []
@@ -5195,7 +5238,7 @@ function infoTraceEndpointKey(endpoint: { page: number; id: number | string }): 
 }
 
 function tracedInfoTraceNodeKeys(): Set<string> {
-  return new Set(infoTraceAllSteps.flatMap((step) => step.nodes.map(infoTraceNodeKey)))
+  return new Set(infoTraceAllSteps.flatMap((step) => [...step.nodes, ...step.via].map(infoTraceNodeKey)))
 }
 
 function computeInfoTraceEndpointState(tracedKeys: Set<string>): InfoTraceEndpointState {
@@ -5290,57 +5333,136 @@ function infoTraceAdjacency(): Map<string, string[]> {
   return adjacency
 }
 
+// Hops start from exits, so endpoints are always passed through; the user
+// chooses whether nets and wires count as hops.
 function infoTraceSkippedKinds(): Set<InfoTraceKind> {
-  return new Set(
-    infoTraceSkipInputs.filter((input) => input.checked).map((input) => input.value as InfoTraceKind),
-  )
+  const skipped = new Set<InfoTraceKind>(['endpoint'])
+  for (const input of infoTraceSkipInputs) {
+    if (input.checked) skipped.add(input.value as InfoTraceKind)
+  }
+  return skipped
 }
 
-// One hop follows the server trace's skip model: pass freely through skipped
-// kinds and stop at the first nodes of any other kind, which form the hop.
-// Components are never skipped.
+function infoTraceNodeLabel(node: InfoTraceNode): string {
+  return node.title[0] || node.descriptions[0] || `${node.kind} ${String(node.id)}`
+}
+
+function computeInfoTracePorts(
+  tracedKeys: Set<string>,
+  openEndpoints: InfoTraceOpenEndpoint[],
+): InfoTracePort[] {
+  const ports: InfoTracePort[] = openEndpoints.map((endpoint) => ({
+    key: `endpoint:${endpoint.page}:${String(endpoint.id)}`,
+    kind: 'endpoint',
+    page: endpoint.page,
+    id: String(endpoint.id),
+    sources: endpoint.sources,
+    targets: endpoint.candidates,
+  }))
+  for (const page of infoTraceIndexData?.pages ?? []) {
+    const wiresByNet = new Map<string, string[]>()
+    for (const relation of page.relations) {
+      const source = String(relation.source ?? '')
+      const target = String(relation.target ?? '')
+      if (relation.type !== 'contains' || !source.startsWith('net:') || !target.startsWith('wire:')) continue
+      wiresByNet.set(source, [...(wiresByNet.get(source) ?? []), target.slice('wire:'.length)])
+    }
+    for (const [netRef, wireIds] of wiresByNet) {
+      const wires = wireIds
+        .map((id) => findInfoTraceNode(page.page_number, 'wire', id))
+        .filter((node): node is InfoTraceNode => Boolean(node))
+      const traced = wires.filter((wire) => tracedKeys.has(infoTraceNodeKey(wire)))
+      const untraced = wires.filter((wire) => !tracedKeys.has(infoTraceNodeKey(wire)))
+      if (traced.length === 0 || untraced.length === 0) continue
+      const id = netRef.slice('net:'.length)
+      ports.push({ key: `net:${page.page_number}:${id}`, kind: 'net', page: page.page_number, id, sources: traced, targets: untraced })
+    }
+  }
+  const seen = new Set<string>()
+  for (const transfer of infoTraceIndexData?.transfers ?? []) {
+    if (transfer.source_component === null || transfer.target_component === undefined) continue
+    const source = findInfoTraceNode(transfer.source_page, 'component', transfer.source_component)
+    const target = findInfoTraceNode(transfer.target_page, 'component', transfer.target_component)
+    if (!source || !target) continue
+    for (const [from, to] of [[source, target], [target, source]] as const) {
+      if (!tracedKeys.has(infoTraceNodeKey(from)) || tracedKeys.has(infoTraceNodeKey(to))) continue
+      const key = `transfer:${infoTraceNodeKey(from)}>${infoTraceNodeKey(to)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      ports.push({ key, kind: 'transfer', page: from.page, id: String(from.id), sources: [from], targets: [to] })
+    }
+  }
+  return ports
+}
+
+// One hop leaves through each selected exit: it passes freely through skipped
+// kinds and stops at the first nodes of any other kind, which form the hop.
+// Components are never skipped, and traced nodes are never re-entered.
 function nextInfoTraceStep(): InfoTraceStep | null {
-  const currentStep = infoTraceAllSteps.at(-1)
-  if (!currentStep) return null
-  const currentNodeKeys = new Set(currentStep.nodes.map(infoTraceNodeKey))
-  const sourceKeys = currentStep.selectedNodeKeys.filter((key) => currentNodeKeys.has(key))
-  if (sourceKeys.length === 0) return null
+  const ports = infoTracePortList.filter((port) => infoTraceSelectedPortKeys.has(port.key))
+  if (ports.length === 0) return null
   const tracedKeys = tracedInfoTraceNodeKeys()
   const endpointState = computeInfoTraceEndpointState(tracedKeys)
   const skipped = infoTraceSkippedKinds()
   const adjacency = infoTraceAdjacency()
   const nodes = new Map<string, InfoTraceNode>()
+  const via = new Map<string, InfoTraceNode>()
   const nets = new Map<string, { page: number; id: number | string }>()
-  const origins: Record<string, string[]> = {}
-  for (const sourceKey of sourceKeys) {
-    const visited = new Set([sourceKey])
-    const queue = [sourceKey]
+  for (const port of ports) {
+    if (port.kind === 'transfer') {
+      for (const target of port.targets) nodes.set(infoTraceNodeKey(target), target)
+      continue
+    }
+    if (port.kind === 'net') nets.set(`${port.page}:${port.id}`, { page: port.page, id: port.id })
+    const start = `${port.page}:${port.kind}:${port.id}`
+    const parents = new Map<string, string[]>([[start, []]])
+    const found: string[] = []
+    const queue = [start]
     while (queue.length > 0) {
       const key = queue.shift()!
       for (const neighbor of adjacency.get(key) ?? []) {
-        if (visited.has(neighbor)) continue
-        visited.add(neighbor)
+        if (tracedKeys.has(neighbor)) continue
+        const knownParents = parents.get(neighbor)
+        if (knownParents) {
+          if (neighbor !== start) knownParents.push(key)
+          continue
+        }
+        parents.set(neighbor, [key])
         const ref = infoTraceNodeRef(neighbor)
         if (!ref) continue
         if (skipped.has(ref.kind)) {
-          if (ref.kind === 'net') nets.set(`${ref.page}:${ref.id}`, { page: ref.page, id: ref.id })
           queue.push(neighbor)
           continue
         }
-        if (tracedKeys.has(neighbor)) continue
         const node = findInfoTraceNode(ref.page, ref.kind, ref.id)
-        if (!node) continue
-        nodes.set(neighbor, node)
-        ;(origins[neighbor] ??= []).push(sourceKey)
+        if (node) {
+          nodes.set(neighbor, node)
+          found.push(neighbor)
+        }
       }
+    }
+    // Keep only the skipped wires and nets on routes that reached a new node.
+    const onRoute = new Set<string>()
+    const stack = [...found]
+    while (stack.length > 0) {
+      for (const previous of parents.get(stack.pop()!) ?? []) {
+        if (previous === start || onRoute.has(previous)) continue
+        onRoute.add(previous)
+        stack.push(previous)
+      }
+    }
+    for (const key of onRoute) {
+      const ref = infoTraceNodeRef(key)
+      if (ref?.kind === 'net') nets.set(`${ref.page}:${ref.id}`, { page: ref.page, id: ref.id })
+      if (ref?.kind !== 'wire') continue
+      const wire = findInfoTraceNode(ref.page, 'wire', ref.id)
+      if (wire) via.set(key, wire)
     }
   }
   // A hop may only contain nodes that have not appeared in any earlier hop.
-  // Keep this final guard even though each expansion path already filters its
-  // candidates, so an exhausted trace can never copy the current hop forward.
   for (const tracedKey of tracedKeys) nodes.delete(tracedKey)
   if (nodes.size === 0) return null
-  const nextTracedKeys = new Set([...tracedKeys, ...nodes.keys()])
+  const nextTracedKeys = new Set([...tracedKeys, ...nodes.keys(), ...via.keys()])
   const nextEndpointState = computeInfoTraceEndpointState(nextTracedKeys)
   const previousResolved = new Set(endpointState.resolved.map(infoTraceEndpointKey))
   const newlyResolved = nextEndpointState.resolved
@@ -5350,13 +5472,16 @@ function nextInfoTraceStep(): InfoTraceStep | null {
     || left.kind.localeCompare(right.kind)
     || String(left.id).localeCompare(String(right.id), undefined, { numeric: true })
   ))
+  for (const key of nodes.keys()) via.delete(key)
+  const orderedVia = [...via.values()].sort((left, right) => (
+    left.page - right.page || String(left.id).localeCompare(String(right.id), undefined, { numeric: true })
+  ))
   return {
     depth: infoTraceAllSteps.length,
     nodes: orderedNodes,
+    via: orderedVia,
     endpoints: newlyResolved,
     nets: [...nets.values()],
-    selectedNodeKeys: [],
-    origins,
   }
 }
 
@@ -5385,50 +5510,42 @@ function infoTraceIsArrow(node: InfoTraceNode, pageIo?: string): boolean {
     && (pageIo === undefined || node.pageIo === pageIo)
 }
 
-// Mirrors the server's directional hop: on a page, a node heads the right way
-// when it is closer than its source to one of the page's target arrows; a
-// source that reaches no target arrow may go to any neighbour; only target
-// arrows continue across pages, and opposite arrows never do.
-function infoTraceHeadsInDirection(
-  node: InfoTraceNode,
-  source: InfoTraceNode,
+// Mirrors the server's directional hop for one exit: an in-page exit heads the
+// right way when it is closer than the traced node it hangs on to one of the
+// page's target arrows; a node that reaches no target arrow may leave through
+// any exit; only target arrows continue across pages, opposite arrows never do.
+function infoTracePortHeadsInDirection(
+  port: InfoTracePort,
   streams: Map<number, InfoTracePageStream>,
   targetIo: 'input' | 'output',
 ): boolean {
-  if (source.page !== node.page) return infoTraceIsArrow(source, targetIo)
-  if (infoTraceIsArrow(source, targetIo)) return false
-  const stream = streams.get(node.page)
+  if (port.kind === 'transfer') return port.sources.some((source) => infoTraceIsArrow(source, targetIo))
+  const stream = streams.get(port.page)
   if (!stream) return false
-  const sourceRef = `${source.kind}:${String(source.id)}`
-  const nodeRef = `${node.kind}:${String(node.id)}`
-  const reachable = stream.arrows[targetIo].filter((arrow) => (
-    arrow !== sourceRef && stream.distances[arrow]?.[sourceRef] !== undefined
-  ))
-  if (reachable.length === 0) return true
-  return reachable.some((arrow) => {
-    const distances = stream.distances[arrow]
-    const nodeDistance = distances[nodeRef]
-    return nodeDistance !== undefined
-      && nodeDistance < distances[sourceRef]
-      && (!infoTraceIsArrow(node) || nodeRef === arrow)
+  const portRef = `${port.kind}:${port.id}`
+  return port.sources.some((source) => {
+    if (infoTraceIsArrow(source, targetIo)) return false
+    const sourceRef = `${source.kind}:${String(source.id)}`
+    const reachable = stream.arrows[targetIo].filter((arrow) => (
+      arrow !== sourceRef && stream.distances[arrow]?.[sourceRef] !== undefined
+    ))
+    if (reachable.length === 0) return true
+    return reachable.some((arrow) => {
+      const distances = stream.distances[arrow]
+      const portDistance = distances[portRef]
+      return portDistance !== undefined && portDistance < distances[sourceRef]
+    })
   })
 }
 
 async function applyInfoTraceDirection(): Promise<void> {
   const direction = infoTraceDirectionSelect.value as InfoTraceDirection
-  const step = infoTraceAllSteps.at(-1)
-  if (!step || direction === 'any') return
-  if (step.depth === 0) {
-    step.selectedNodeKeys = step.nodes.map(infoTraceNodeKey)
-    renderInfoTraceSteps()
-    return
-  }
-  const previous = infoTraceAllSteps[infoTraceAllSteps.length - 2]
-  const sources = new Map(previous.nodes.map((node) => [infoTraceNodeKey(node), node]))
-  const pages = [...new Set([...previous.nodes, ...step.nodes].map((node) => node.page))]
-  infoTraceStatus.textContent = `Selecting ${direction} nodes…`
+  const ports = infoTracePortList
+  if (direction === 'any' || ports.length === 0) return
+  const pages = [...new Set(ports.filter((port) => port.kind !== 'transfer').map((port) => port.page))]
+  infoTraceStatus.textContent = `Selecting ${direction} exits…`
   const loaded = await Promise.all(pages.map(async (page) => [page, await loadInfoTracePageStream(page)] as const))
-  if (infoTraceAllSteps.at(-1) !== step || infoTraceDirectionSelect.value !== direction) return
+  if (infoTracePortList !== ports || infoTraceDirectionSelect.value !== direction) return
   const streams = new Map<number, InfoTracePageStream>()
   const missingPages: number[] = []
   for (const [page, stream] of loaded) {
@@ -5436,15 +5553,103 @@ async function applyInfoTraceDirection(): Promise<void> {
     else missingPages.push(page)
   }
   const targetIo = direction === 'downstream' ? 'output' : 'input'
-  step.selectedNodeKeys = step.nodes
-    .filter((node) => (step.origins?.[infoTraceNodeKey(node)] ?? []).some((originKey) => {
-      const source = sources.get(originKey)
-      return source !== undefined && infoTraceHeadsInDirection(node, source, streams, targetIo)
-    }))
-    .map(infoTraceNodeKey)
-  renderInfoTraceSteps()
-  infoTraceStatus.textContent = `${step.selectedNodeKeys.length} of ${step.nodes.length} nodes head ${direction} and are selected for the next hop.`
+  infoTraceSelectedPortKeys = new Set(
+    ports.filter((port) => infoTracePortHeadsInDirection(port, streams, targetIo)).map((port) => port.key),
+  )
+  renderInfoTracePorts()
+  renderInfoTraceHighlights()
+  infoTraceStatus.textContent = `${infoTraceSelectedPortKeys.size} of ${ports.length} exits head ${direction} and are selected for the next hop.`
     + (missingPages.length > 0 ? ` No direction data for page${missingPages.length === 1 ? '' : 's'} ${missingPages.join(', ')}.` : '')
+}
+
+function infoTracePortLabel(port: InfoTracePort): string {
+  const sources = port.sources.map(infoTraceNodeLabel)
+  const targets = port.targets.map(infoTraceNodeLabel)
+  const list = (labels: string[]): string => (
+    labels.length > 3 ? `${labels.slice(0, 3).join(', ')} +${labels.length - 3}` : labels.join(', ')
+  )
+  if (port.kind === 'transfer') {
+    const [target] = port.targets
+    return `P${port.page} ${sources[0]} ⇒ P${target.page} ${targets[0]}`
+  }
+  return `P${port.page} · ${port.kind} ${port.id} · ${list(sources)} → ${list(targets)}`
+}
+
+function renderInfoTracePorts(): void {
+  infoTracePortsRoot.replaceChildren()
+  if (!isInfoTraceActive()) return
+  const ports = infoTracePortList
+  const section = document.createElement('details')
+  section.className = 'info-trace-step'
+  section.open = true
+  const heading = document.createElement('summary')
+  heading.className = 'info-trace-step-summary'
+  const headingLabel = document.createElement('span')
+  headingLabel.textContent = `Continue from · ${infoTraceSelectedPortKeys.size}/${ports.length} exit${ports.length === 1 ? '' : 's'} selected`
+  const selectAllLabel = document.createElement('label')
+  selectAllLabel.className = 'info-trace-select-all'
+  selectAllLabel.addEventListener('click', (event) => event.stopPropagation())
+  const selectAllCheckbox = document.createElement('input')
+  selectAllCheckbox.type = 'checkbox'
+  selectAllCheckbox.checked = ports.length > 0 && infoTraceSelectedPortKeys.size === ports.length
+  selectAllCheckbox.indeterminate = infoTraceSelectedPortKeys.size > 0 && infoTraceSelectedPortKeys.size < ports.length
+  selectAllCheckbox.disabled = ports.length === 0
+  selectAllCheckbox.setAttribute('aria-label', 'Select all exits')
+  selectAllCheckbox.addEventListener('click', (event) => event.stopPropagation())
+  selectAllCheckbox.addEventListener('change', () => {
+    infoTraceSelectedPortKeys = new Set(selectAllCheckbox.checked ? ports.map((port) => port.key) : [])
+    renderInfoTracePorts()
+    renderInfoTraceHighlights()
+  })
+  const selectAllText = document.createElement('span')
+  selectAllText.textContent = 'All'
+  selectAllLabel.append(selectAllCheckbox, selectAllText)
+  heading.append(headingLabel, selectAllLabel)
+  section.appendChild(heading)
+  const list = document.createElement('div')
+  list.className = 'info-trace-step-nodes'
+  for (const port of ports) {
+    const selected = infoTraceSelectedPortKeys.has(port.key)
+    const row = document.createElement('div')
+    row.className = selected ? 'info-trace-node-row is-selected' : 'info-trace-node-row'
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'info-trace-node'
+    button.textContent = infoTracePortLabel(port)
+    button.title = `Show this ${port.kind === 'transfer' ? 'transfer' : port.kind} on page ${port.page}`
+    button.addEventListener('click', () => {
+      void focusInfoTracePort(port)
+    })
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.className = 'info-trace-node-checkbox'
+    checkbox.checked = selected
+    checkbox.setAttribute('aria-label', `Continue from ${infoTracePortLabel(port)}`)
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) infoTraceSelectedPortKeys.add(port.key)
+      else infoTraceSelectedPortKeys.delete(port.key)
+      renderInfoTracePorts()
+      renderInfoTraceHighlights()
+      infoTraceStatus.textContent = `${infoTraceSelectedPortKeys.size} of ${ports.length} exits selected for the next hop.`
+    })
+    row.append(button, checkbox)
+    list.appendChild(row)
+  }
+  if (ports.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'muted small'
+    empty.textContent = 'No exits left: every connection of the traced nodes is already traced.'
+    list.appendChild(empty)
+  }
+  section.appendChild(list)
+  infoTracePortsRoot.appendChild(section)
+}
+
+async function focusInfoTracePort(port: InfoTracePort): Promise<void> {
+  infoTraceFocusedPortKey = port.key
+  if (activePageNumber !== port.page) await selectPage(port.page)
+  renderInfoTraceHighlights(true)
+  setStatus(`Highlighted ${infoTracePortLabel(port)}.`)
 }
 
 function updateInfoTraceSkipSummary(): void {
@@ -5465,7 +5670,7 @@ function renderInfoTraceHighlights(scrollToFirst = false): void {
   const wireIds = new Set<string>()
   const endpointIds = new Set<string>()
   for (const step of infoTraceAllSteps) {
-    for (const node of step.nodes) {
+    for (const node of [...step.nodes, ...step.via]) {
       if (node.page !== state.pageNumber) continue
       if (node.kind === 'component') componentIds.add(String(node.id))
       else if (node.kind === 'wire') wireIds.add(String(node.id))
@@ -5474,6 +5679,11 @@ function renderInfoTraceHighlights(scrollToFirst = false): void {
   }
   for (const endpointRef of infoTraceResolvedEndpoints) {
     if (endpointRef.page === state.pageNumber) endpointIds.add(String(endpointRef.id))
+  }
+  for (const port of infoTracePortList) {
+    if (port.kind === 'endpoint' && port.page === state.pageNumber && infoTraceSelectedPortKeys.has(port.key)) {
+      endpointIds.add(port.id)
+    }
   }
 
   // Reuse Extract Info's per-shape rendering: components are the active/red
@@ -5488,25 +5698,45 @@ function renderInfoTraceHighlights(scrollToFirst = false): void {
     .filter((endpoint) => endpointIds.has(String(endpoint.id)))
   activeExtractHighlightTexts = []
   renderExtractVectorHighlights()
-  const currentStep = infoTraceAllSteps.at(-1)
-  const selectedKeys = new Set(currentStep?.selectedNodeKeys ?? [])
-  const selectedVectors = [
-    ...result.components
-      .filter((component) => selectedKeys.has(`${state.pageNumber}:component:${String(component.id)}`))
-      .flatMap((component) => component.shape),
-    ...result.wires
-      .filter((wire) => selectedKeys.has(`${state.pageNumber}:wire:${String(wire.id)}`))
-      .flatMap((wire) => wire.vectors),
-  ]
-  for (const vector of selectedVectors) {
-    const bbox = vector.bbox
-    if (!bbox) continue
+  // Frame the exit last clicked in the exit list.
+  const focused = infoTracePortList.find((port) => port.key === infoTraceFocusedPortKey)
+  const focusBoxes: Array<Partial<BBox> | null | undefined> = []
+  if (focused && focused.page === state.pageNumber) {
+    if (focused.kind === 'endpoint') {
+      focusBoxes.push(result.endpoints.find((endpoint) => String(endpoint.id) === focused.id)?.bbox)
+    } else if (focused.kind === 'net') {
+      const wireIdsInNet = new Set(focused.targets.map((target) => String(target.id)))
+      focusBoxes.push(...result.wires
+        .filter((wire) => wireIdsInNet.has(String(wire.id)))
+        .flatMap((wire) => wire.vectors.map((vector) => vector.bbox)))
+    } else {
+      const arrowIds = new Set(focused.sources.map((source) => String(source.id)))
+      focusBoxes.push(...result.components
+        .filter((component) => arrowIds.has(String(component.id)))
+        .flatMap((component) => component.shape.map((vector) => vector.bbox)))
+    }
+  }
+  for (const bbox of focusBoxes) {
+    if (!bbox || bbox.x0 === undefined || bbox.y0 === undefined) continue
+    const minimum = 8
+    let left = bbox.x0 * state.scale
+    let top = bbox.y0 * state.scale
+    let width = ((bbox.x1 ?? bbox.x0) - bbox.x0) * state.scale
+    let height = ((bbox.y1 ?? bbox.y0) - bbox.y0) * state.scale
+    if (width < minimum) {
+      left -= (minimum - width) / 2
+      width = minimum
+    }
+    if (height < minimum) {
+      top -= (minimum - height) / 2
+      height = minimum
+    }
     const node = document.createElement('div')
     node.className = 'info-trace-selected-shape-highlight'
-    node.style.left = `${bbox.x0 * state.scale}px`
-    node.style.top = `${bbox.y0 * state.scale}px`
-    node.style.width = `${Math.max((bbox.x1 - bbox.x0) * state.scale, 5)}px`
-    node.style.height = `${Math.max((bbox.y1 - bbox.y0) * state.scale, 5)}px`
+    node.style.left = `${left}px`
+    node.style.top = `${top}px`
+    node.style.width = `${width}px`
+    node.style.height = `${height}px`
     state.overlay.appendChild(node)
   }
   if (scrollToFirst) {
@@ -5519,90 +5749,67 @@ function renderInfoTraceHighlights(scrollToFirst = false): void {
   }
 }
 
-function updateInfoTraceStepSelection(step: InfoTraceStep, selectedKeys: Iterable<string>): void {
-  if (step !== infoTraceAllSteps.at(-1)) return
-  const allowedKeys = new Set(step.nodes.map(infoTraceNodeKey))
-  step.selectedNodeKeys = [...new Set(selectedKeys)]
-    .filter((key) => allowedKeys.has(key))
-  renderInfoTraceSteps()
-  infoTraceStatus.textContent = `${step.selectedNodeKeys.length} of ${step.nodes.length} nodes selected for the next hop.`
-}
-
 function renderInfoTraceSteps(): void {
   refreshInfoTraceEndpointState()
+  const tracedKeys = tracedInfoTraceNodeKeys()
+  infoTracePortList = isInfoTraceActive() ? computeInfoTracePorts(tracedKeys, infoTraceOpenEndpoints) : []
+  const portKeys = new Set(infoTracePortList.map((port) => port.key))
+  infoTraceSelectedPortKeys = new Set([...infoTraceSelectedPortKeys].filter((key) => portKeys.has(key)))
+  if (infoTraceFocusedPortKey && !portKeys.has(infoTraceFocusedPortKey)) infoTraceFocusedPortKey = null
   currentPageState?.overlay.classList.toggle('is-info-tracing', isInfoTraceActive())
   infoTraceSteps.replaceChildren()
   for (const step of infoTraceAllSteps) {
-    const isLatest = step === infoTraceAllSteps.at(-1)
-    const selectedKeys = new Set(step.selectedNodeKeys)
     const section = document.createElement('details')
     section.className = 'info-trace-step'
-    section.open = isLatest
+    section.open = step === infoTraceAllSteps.at(-1)
     const heading = document.createElement('summary')
     heading.className = 'info-trace-step-summary'
     const stepLabel = step.depth === 0 ? 'Start' : `Hop ${step.depth}`
     const headingLabel = document.createElement('span')
-    headingLabel.textContent = `${stepLabel} · ${selectedKeys.size}/${step.nodes.length} selected${step.nets.length > 0 ? ` · ${step.nets.length} net${step.nets.length === 1 ? '' : 's'}` : ''}${step.endpoints.length > 0 ? ` · ${step.endpoints.length} endpoint${step.endpoints.length === 1 ? '' : 's'}` : ''}`
-    const selectAllLabel = document.createElement('label')
-    selectAllLabel.className = 'info-trace-select-all'
-    selectAllLabel.addEventListener('click', (event) => event.stopPropagation())
-    const selectAllCheckbox = document.createElement('input')
-    selectAllCheckbox.type = 'checkbox'
-    selectAllCheckbox.checked = step.nodes.length > 0 && selectedKeys.size === step.nodes.length
-    selectAllCheckbox.indeterminate = selectedKeys.size > 0 && selectedKeys.size < step.nodes.length
-    selectAllCheckbox.disabled = !isLatest
-    selectAllCheckbox.setAttribute('aria-label', `Select all nodes in ${stepLabel}`)
-    selectAllCheckbox.addEventListener('click', (event) => event.stopPropagation())
-    selectAllCheckbox.addEventListener('change', () => {
-      updateInfoTraceStepSelection(
-        step,
-        selectAllCheckbox.checked ? step.nodes.map(infoTraceNodeKey) : [],
-      )
-    })
-    const selectAllText = document.createElement('span')
-    selectAllText.textContent = 'All'
-    selectAllLabel.append(selectAllCheckbox, selectAllText)
-    heading.append(headingLabel, selectAllLabel)
+    headingLabel.textContent = `${stepLabel} · ${step.nodes.length} node${step.nodes.length === 1 ? '' : 's'}${step.via.length > 0 ? ` · ${step.via.length} wire${step.via.length === 1 ? '' : 's'} passed` : ''}${step.nets.length > 0 ? ` · ${step.nets.length} net${step.nets.length === 1 ? '' : 's'}` : ''}${step.endpoints.length > 0 ? ` · ${step.endpoints.length} endpoint${step.endpoints.length === 1 ? '' : 's'}` : ''}`
+    heading.append(headingLabel)
     section.appendChild(heading)
     const list = document.createElement('div')
     list.className = 'info-trace-step-nodes'
     for (const node of step.nodes) {
-      const nodeKey = infoTraceNodeKey(node)
       const row = document.createElement('div')
-      row.className = selectedKeys.has(nodeKey)
-        ? 'info-trace-node-row is-selected'
-        : 'info-trace-node-row'
+      row.className = 'info-trace-node-row'
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'info-trace-node'
-      const label = node.title[0] || node.descriptions[0] || `${node.kind} ${String(node.id)}`
-      button.textContent = `P${node.page} · ${node.kind} ${String(node.id)} · ${label}`
+      button.textContent = `P${node.page} · ${node.kind} ${String(node.id)} · ${infoTraceNodeLabel(node)}`
       button.addEventListener('click', () => requestInfoTraceNavigation(node))
-      const checkbox = document.createElement('input')
-      checkbox.type = 'checkbox'
-      checkbox.className = 'info-trace-node-checkbox'
-      checkbox.checked = selectedKeys.has(nodeKey)
-      checkbox.disabled = !isLatest
-      checkbox.setAttribute('aria-label', `Use ${node.kind} ${String(node.id)} for the next hop`)
-      checkbox.addEventListener('change', () => {
-        const nextSelectedKeys = new Set(step.selectedNodeKeys)
-        if (checkbox.checked) nextSelectedKeys.add(nodeKey)
-        else nextSelectedKeys.delete(nodeKey)
-        updateInfoTraceStepSelection(step, nextSelectedKeys)
-      })
-      row.append(button, checkbox)
+      row.append(button)
       list.appendChild(row)
+    }
+    if (step.via.length > 0) {
+      const viaHeading = document.createElement('p')
+      viaHeading.className = 'muted small info-trace-via-heading'
+      viaHeading.textContent = 'Passed through'
+      list.appendChild(viaHeading)
+      for (const wire of step.via) {
+        const row = document.createElement('div')
+        row.className = 'info-trace-node-row is-via'
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'info-trace-node'
+        button.textContent = `P${wire.page} · wire ${String(wire.id)} · ${infoTraceNodeLabel(wire)}`
+        button.addEventListener('click', () => requestInfoTraceNavigation(wire))
+        row.append(button)
+        list.appendChild(row)
+      }
     }
     section.appendChild(list)
     infoTraceSteps.appendChild(section)
   }
+  renderInfoTracePorts()
   const latestDepth = Math.max(0, infoTraceAllSteps.length - 1)
   infoTraceDepth.textContent = infoTraceAllSteps.length > 0
-    ? `${latestDepth} hop${latestDepth === 1 ? '' : 's'} · ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'}`
+    ? `${latestDepth} hop${latestDepth === 1 ? '' : 's'} · ${infoTracePortList.length} exit${infoTracePortList.length === 1 ? '' : 's'}`
     : 'Select a target'
   infoTraceBackBtn.disabled = infoTraceAllSteps.length <= 1
   // Keep Next available while tracing so a click can explain whether the user
-  // needs to select a node or whether the selected branch has reached its end.
+  // needs to select an exit or whether the selected exits lead nowhere new.
   infoTraceForwardBtn.disabled = infoTraceAllSteps.length === 0
   renderInfoTraceHighlights()
 }
@@ -5622,13 +5829,15 @@ async function chooseInfoTraceRoot(): Promise<void> {
   infoTraceAllSteps = root ? [{
     depth: 0,
     nodes: [root],
+    via: [],
     endpoints: [],
     nets: [],
-    selectedNodeKeys: [],
   }] : []
+  infoTraceSelectedPortKeys = new Set()
+  infoTraceFocusedPortKey = null
   renderInfoTraceSteps()
   infoTraceStatus.textContent = root
-    ? `Tracing from page ${root.page} ${root.kind} ${String(root.id)} with ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'}.`
+    ? `Tracing from page ${root.page} ${root.kind} ${String(root.id)}. Select the exits to continue from.`
     : 'Select a target ID to begin tracing.'
   if (!root) return
   void applyInfoTraceDirection()
@@ -5640,6 +5849,8 @@ async function chooseInfoTraceRoot(): Promise<void> {
 
 function stopInfoTrace(): void {
   infoTraceAllSteps = []
+  infoTraceSelectedPortKeys = new Set()
+  infoTraceFocusedPortKey = null
   pendingInfoTraceNavigation = null
   if (infoTraceConfirmDialog.open) infoTraceConfirmDialog.close()
   if (infoTraceStopDialog.open) infoTraceStopDialog.close()
@@ -5769,8 +5980,8 @@ infoTraceStopConfirmBtn.addEventListener('click', stopInfoTrace)
 infoTraceForwardBtn.addEventListener('click', () => {
   const currentStep = infoTraceAllSteps.at(-1)
   if (!currentStep) return
-  if (currentStep.selectedNodeKeys.length === 0) {
-    infoTraceStatus.textContent = 'Select at least one node in the current hop before continuing.'
+  if (infoTraceSelectedPortKeys.size === 0) {
+    infoTraceStatus.textContent = 'Select at least one exit before continuing.'
     return
   }
   const next = nextInfoTraceStep()
@@ -5778,12 +5989,14 @@ infoTraceForwardBtn.addEventListener('click', () => {
     const latestDepth = Math.max(0, infoTraceAllSteps.length - 1)
     infoTraceDepth.textContent = `${latestDepth} hop${latestDepth === 1 ? '' : 's'} · End`
     infoTraceForwardBtn.disabled = true
-    infoTraceStatus.textContent = 'End of trace: the selected nodes do not lead to any new components or wires.'
+    infoTraceStatus.textContent = 'End of trace: the selected exits do not lead to any new nodes.'
     return
   }
   infoTraceAllSteps.push(next)
+  infoTraceSelectedPortKeys = new Set()
+  infoTraceFocusedPortKey = null
   renderInfoTraceSteps()
-  infoTraceStatus.textContent = `Added hop ${next.depth}. ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'} remain.`
+  infoTraceStatus.textContent = `Added hop ${next.depth}. ${infoTracePortList.length} exit${infoTracePortList.length === 1 ? '' : 's'} to continue from.`
   void applyInfoTraceDirection()
 })
 infoTraceDirectionSelect.addEventListener('change', () => {
@@ -5792,11 +6005,80 @@ infoTraceDirectionSelect.addEventListener('change', () => {
 for (const input of infoTraceSkipInputs) {
   input.addEventListener('change', updateInfoTraceSkipSummary)
 }
+
+// The trace list fills the panel until it is dragged; a dragged height is kept
+// per browser, and the tab scrolls when the list grows past the panel.
+const INFO_TRACE_RESULTS_HEIGHT_KEY = 'eplan.infoTraceResultsHeight'
+const INFO_TRACE_RESULTS_MIN_HEIGHT = 120
+
+function setInfoTraceResultsHeight(height: number | null): void {
+  if (height === null) {
+    infoTraceResults.style.removeProperty('flex')
+    infoTraceResults.style.removeProperty('height')
+    return
+  }
+  infoTraceResults.style.flex = '0 0 auto'
+  infoTraceResults.style.height = `${Math.max(INFO_TRACE_RESULTS_MIN_HEIGHT, Math.round(height))}px`
+}
+
+function saveInfoTraceResultsHeight(): void {
+  try {
+    if (infoTraceResults.style.height) {
+      localStorage.setItem(INFO_TRACE_RESULTS_HEIGHT_KEY, String(infoTraceResults.getBoundingClientRect().height))
+    } else {
+      localStorage.removeItem(INFO_TRACE_RESULTS_HEIGHT_KEY)
+    }
+  } catch {
+    // Storage can be unavailable; the height then only lasts for this page.
+  }
+}
+
+try {
+  const savedHeight = Number(localStorage.getItem(INFO_TRACE_RESULTS_HEIGHT_KEY))
+  if (savedHeight > 0) setInfoTraceResultsHeight(savedHeight)
+} catch {
+  // Keep the default height when storage is unavailable.
+}
+
+infoTraceResizeHandle.addEventListener('pointerdown', (event) => {
+  event.preventDefault()
+  const startY = event.clientY
+  const startHeight = infoTraceResults.getBoundingClientRect().height
+  infoTraceResizeHandle.setPointerCapture(event.pointerId)
+  infoTraceResizeHandle.classList.add('is-dragging')
+  const move = (moveEvent: PointerEvent): void => {
+    setInfoTraceResultsHeight(startHeight + moveEvent.clientY - startY)
+  }
+  const stop = (): void => {
+    infoTraceResizeHandle.removeEventListener('pointermove', move)
+    infoTraceResizeHandle.removeEventListener('pointerup', stop)
+    infoTraceResizeHandle.removeEventListener('pointercancel', stop)
+    infoTraceResizeHandle.classList.remove('is-dragging')
+    saveInfoTraceResultsHeight()
+  }
+  infoTraceResizeHandle.addEventListener('pointermove', move)
+  infoTraceResizeHandle.addEventListener('pointerup', stop)
+  infoTraceResizeHandle.addEventListener('pointercancel', stop)
+})
+infoTraceResizeHandle.addEventListener('dblclick', () => {
+  setInfoTraceResultsHeight(null)
+  saveInfoTraceResultsHeight()
+})
+infoTraceResizeHandle.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+  event.preventDefault()
+  const step = event.key === 'ArrowDown' ? 24 : -24
+  setInfoTraceResultsHeight(infoTraceResults.getBoundingClientRect().height + step)
+  saveInfoTraceResultsHeight()
+})
 infoTraceBackBtn.addEventListener('click', () => {
   if (infoTraceAllSteps.length <= 1) return
   infoTraceAllSteps.pop()
+  infoTraceSelectedPortKeys = new Set()
+  infoTraceFocusedPortKey = null
   renderInfoTraceSteps()
-  infoTraceStatus.textContent = `Removed the latest hop; now at hop ${infoTraceAllSteps.length - 1} with ${infoTraceOpenEndpoints.length} free endpoint${infoTraceOpenEndpoints.length === 1 ? '' : 's'}.`
+  infoTraceStatus.textContent = `Removed the latest hop; now at hop ${infoTraceAllSteps.length - 1} with ${infoTracePortList.length} exit${infoTracePortList.length === 1 ? '' : 's'}.`
+  void applyInfoTraceDirection()
 })
 infoTraceConfirmCancelBtn.addEventListener('click', () => {
   pendingInfoTraceNavigation = null
@@ -6057,6 +6339,7 @@ function highlightExtractedItem(
   vectors: ApiPathBase[],
 ): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   const nodeRef = extractNodeRef(category, id)
   const relatedNodes = expandEndpointRelations(directlyRelatedExtractNodes(nodeRef))
   relatedNodes.delete(nodeRef)
@@ -6077,6 +6360,7 @@ function hasSharedEndpoint(
 
 function highlightExtractedNet(net: ExtractedNet): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   const result = extractInfoResultData
   if (!result) return
   const selectedIds = new Set(net.wire_ids.map(String))
@@ -6098,6 +6382,7 @@ function highlightExtractedNet(net: ExtractedNet): void {
 
 function highlightExtractedEndpoint(endpoint: ExtractedEndpoint): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   const relatedNodes = directlyRelatedExtractNodes(extractNodeRef('endpoint', endpoint.id))
   activeExtractHighlightEndpoints = [endpoint]
   activeExtractHighlightTexts = []
@@ -6108,6 +6393,7 @@ function highlightExtractedEndpoint(endpoint: ExtractedEndpoint): void {
 
 function highlightExtractedRelation(relation: ExtractedRelation): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   const nodeRefs = new Set([String(relation.source ?? ''), String(relation.target ?? '')])
   activeExtractHighlightEndpoints = extractEndpointsForNodes(nodeRefs)
   activeExtractHighlightTexts = []
@@ -6144,6 +6430,7 @@ function highlightExtractedHyperlink(hyperlink: ExtractedHyperlink): void {
 
 function highlightRemainingVector(vector: ApiPathBase): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   activeExtractHighlightVectors = [vector]
   relatedExtractHighlightVectors = []
   activeExtractHighlightEndpoints = []
@@ -6153,6 +6440,7 @@ function highlightRemainingVector(vector: ApiPathBase): void {
 
 function highlightRemainingText(location: unknown): void {
   if (blockNonTraceHighlight()) return
+  clearReaderSelection()
   const coordinates = Array.isArray(location)
     ? location.slice(0, 4)
     : location && typeof location === 'object'

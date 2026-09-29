@@ -1,10 +1,12 @@
 """Document-level n-hop tracing over the parsed graph database.
 
 A hop is counted when the trace arrives at a node whose kind is not skipped.
-Arriving at a skipped kind (``endpoint``/``net``/``group``/``wire``) is free, so
+Arriving at a skipped kind (``endpoint``/``net``/``wire``) is free, so
 the trace keeps expanding through it until it reaches counted nodes, and the hop
 ends there. Transfers are edges between components and therefore cost one hop.
 Every node is reached at most once, which keeps loops from being re-expanded.
+Groups only frame components and do not connect them, so they are never
+traversed: a component never reaches another through a shared group.
 
 With ``direction`` set to ``upstream`` or ``downstream``, every hop also has to
 head toward the page's input or output arrows; see :class:`_DirectedTracer`.
@@ -27,9 +29,9 @@ from pdf_parser.parsed_json import global_id, id_kind, id_local_part
 
 ResponseFormat = Literal["subgraph", "hops"]
 TraceDirection = Literal["any", "upstream", "downstream"]
-SKIPPABLE_KINDS = frozenset({"endpoint", "net", "group", "wire"})
-DEFAULT_SKIP = ("endpoint", "net", "group")
-NODE_KINDS = ("component", "wire", "endpoint", "net", "group")
+SKIPPABLE_KINDS = frozenset({"endpoint", "net", "wire"})
+DEFAULT_SKIP = ("endpoint", "net")
+NODE_KINDS = ("component", "wire", "endpoint", "net")
 TRACE_EDGE_KINDS = ("connection", "contains", "transfer")
 _QUERY_CHUNK = 400
 
@@ -74,6 +76,8 @@ def trace_document(
         if file is None or start_page is None or start_kind is None or start_local_id is None:
             raise ValueError("start needs a global id, or file, page, kind and id")
         start_id = global_id(file, start_page, start_kind, start_local_id)
+    if id_kind(start_id) == "group":
+        raise ValueError("groups are not traced; start from a component or wire")
 
     with closing(connect_parsed_graph(database_path)) as connection:
         row = connection.execute("SELECT filename FROM nodes WHERE id = ?", (start_id,)).fetchone()
@@ -288,6 +292,8 @@ class _GraphTracer:
                 [*chunk, *chunk],
             )
             for edge_id, kind, source, target, source_page, target_page, properties in rows:
+                if id_kind(source) == "group" or id_kind(target) == "group":
+                    continue
                 self.edges.setdefault(edge_id, {
                     "id": edge_id,
                     "type": kind,
@@ -393,7 +399,7 @@ class _DirectedTracer:
         while queue:
             current = queue.popleft()
             for edge_id, neighbor in page.adjacency[current]:
-                if neighbor == start or not allowed(current, neighbor):
+                if neighbor == start or id_kind(neighbor) == "group" or not allowed(current, neighbor):
                     continue
                 if neighbor in predecessors:
                     predecessors[neighbor].append((edge_id, current))

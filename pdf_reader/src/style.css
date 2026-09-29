@@ -2461,11 +2461,51 @@ pre {
   font-size: 12px;
 }
 
+/* Exits and hops share one scroll area so neither list is squeezed. */
+.info-trace-results {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+}
+
+/* A dragged list may grow past the panel, so the tab itself scrolls. */
+#tab-panel-info-trace {
+  overflow-y: auto;
+}
+
+.info-trace-resize-handle {
+  position: relative;
+  flex: 0 0 auto;
+  height: 12px;
+  margin-top: -6px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.info-trace-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-border);
+  transform: translate(-50%, -50%);
+}
+
+.info-trace-resize-handle:hover::after,
+.info-trace-resize-handle:focus-visible::after,
+.info-trace-resize-handle.is-dragging::after {
+  background: var(--muted);
+}
+
 .info-trace-steps {
   display: grid;
   gap: 8px;
-  min-height: 0;
-  overflow: auto;
 }
 
 .info-trace-step {
@@ -2540,6 +2580,15 @@ pre {
   border-color: rgba(37, 99, 235, 0.72);
   background: rgba(59, 130, 246, 0.16);
   box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.info-trace-via-heading {
+  margin: 4px 0 0;
+}
+
+.info-trace-node-row.is-via {
+  padding-left: 12px;
+  opacity: 0.8;
 }
 
 .info-trace-node {

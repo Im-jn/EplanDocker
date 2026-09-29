@@ -257,13 +257,14 @@ Every component carries a `subclass`: the type of its only element (such as `sym
 {
   "start": {"id": "Plan A/p12/component/4"},
   "max_hops": 2,
-  "skip": ["endpoint", "net", "group"],
+  "skip": ["endpoint", "net"],
   "response_format": "subgraph"
 }
 ```
 
 - `start` is a global id or `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`; `file` may omit `.pdf`.
-- Reaching a kind listed in `skip` (`endpoint`, `net`, `group`, `wire`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers are edges between components, so crossing one costs a hop.
+- Reaching a kind listed in `skip` (`endpoint`, `net`, `wire`; default `endpoint` and `net`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers are edges between components, so crossing one costs a hop.
+- Groups only frame components and do not connect them, so tracing never passes through a group and cannot start from one.
 - Each node is reached once, so loops are never expanded twice.
 - `direction` defaults to `any` (no direction). With `downstream` or `upstream`, every hop heads toward the page's arrow components whose `page_io` is `output` or `input`:
   - a node that can reach such arrows only follows the shortest paths toward them;

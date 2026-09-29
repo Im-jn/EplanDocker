@@ -56,13 +56,13 @@ class TraceStart(BaseModel):
     id: int | str
     file: str | None = None
     page: int | None = Field(default=None, ge=1)
-    kind: Literal["component", "wire", "endpoint", "net", "group"] | None = None
+    kind: Literal["component", "wire", "endpoint", "net"] | None = None
 
 
 class TraceRequest(BaseModel):
     start: TraceStart
     max_hops: int = Field(default=1, ge=0, le=50)
-    skip: list[Literal["endpoint", "net", "group", "wire"]] = Field(
+    skip: list[Literal["endpoint", "net", "wire"]] = Field(
         default_factory=lambda: list(DEFAULT_SKIP)
     )
     direction: Literal["any", "upstream", "downstream"] = "any"

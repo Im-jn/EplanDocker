@@ -85,13 +85,13 @@ def test_default_skip_counts_only_components_and_wires() -> None:
     with TemporaryDirectory() as directory:
         result = _trace(directory, max_hops=4, response_format="hops")
 
-    assert result["skip"] == ["endpoint", "group", "net"]
+    assert result["skip"] == ["endpoint", "net"]
     assert result["reached_hops"] == 4
     hops = [hop["pages"] for hop in result["hops"]]
     assert _ids(hops[0], "components") == ["plan/p1/component/1"]
     assert _ids(hops[0], "endpoints") == ["plan/p1/endpoint/10"]
-    assert _ids(hops[0], "groups") == ["plan/p1/group/5"]
-    assert _ids(hops[1], "components") == ["plan/p1/component/6"]
+    assert all("groups" not in page for pages in hops for page in pages)
+    assert _ids(hops[1], "components") == []
     assert _ids(hops[1], "wires") == ["plan/p1/wire/2"]
     assert _ids(hops[1], "nets") == ["plan/p1/net/7"]
     assert _ids(hops[2], "wires") == ["plan/p1/wire/3"]
@@ -99,6 +99,10 @@ def test_default_skip_counts_only_components_and_wires() -> None:
     assert _ids(hops[4], "components") == ["plan/p2/component/9"]
     assert _ids(hops[4], "transfers") == ["plan/p1/transfer/0"]
     assert hops[4][0]["transfers"][0]["target_component"] == "plan/p2/component/9"
+    # C6 shares only a group with the start, and groups are never traversed.
+    assert "plan/p1/component/6" not in {
+        component for pages in hops for component in _ids(pages, "components")
+    }
 
 
 def test_hop_stops_at_counted_nodes() -> None:
@@ -106,7 +110,7 @@ def test_hop_stops_at_counted_nodes() -> None:
         result = _trace(directory, max_hops=1)
 
     pages = result["result"]["pages"]
-    assert _ids(pages, "components") == ["plan/p1/component/1", "plan/p1/component/6"]
+    assert _ids(pages, "components") == ["plan/p1/component/1"]
     assert _ids(pages, "wires") == ["plan/p1/wire/2"]
     assert _ids(pages, "nets") == []
     assert pages[0]["components"][0]["page_io"] == "input"
@@ -115,8 +119,6 @@ def test_hop_stops_at_counted_nodes() -> None:
     assert {relation["id"] for relation in pages[0]["relations"]} == {
         "plan/p1/relation/0",
         "plan/p1/relation/1",
-        "plan/p1/relation/6",
-        "plan/p1/relation/7",
     }
 
 
@@ -137,14 +139,11 @@ def test_skipping_wires_traces_component_to_component() -> None:
         result = _trace(
             directory,
             max_hops=1,
-            skip=("endpoint", "net", "group", "wire"),
+            skip=("endpoint", "net", "wire"),
             response_format="hops",
         )
 
-    assert _ids(result["hops"][1]["pages"], "components") == [
-        "plan/p1/component/4",
-        "plan/p1/component/6",
-    ]
+    assert _ids(result["hops"][1]["pages"], "components") == ["plan/p1/component/4"]
 
 
 def test_loops_reach_each_node_once() -> None:
@@ -156,7 +155,7 @@ def test_loops_reach_each_node_once() -> None:
         entity["id"]
         for hop in result["hops"]
         for page in hop["pages"]
-        for collection in ("components", "wires", "endpoints", "nets", "groups")
+        for collection in ("components", "wires", "endpoints", "nets")
         for entity in page[collection]
     ]
     assert len(seen) == len(set(seen))
@@ -203,6 +202,8 @@ def test_rejects_missing_start_document_and_bad_skip() -> None:
         for kwargs, error in (
             ({"start_id": "plan/p1/component/999"}, TraceStartNotFoundError),
             ({"skip": ("transfer",)}, ValueError),
+            ({"skip": ("group",)}, ValueError),
+            ({"start_id": "plan/p1/group/5"}, ValueError),
         ):
             try:
                 _trace(directory, max_hops=1, **kwargs)

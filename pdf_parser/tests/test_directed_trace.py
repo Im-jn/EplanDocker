@@ -10,7 +10,7 @@ from pdf_parser.parsed_graph import save_parsed_graph
 from pdf_parser.parsed_json import build_parsed_json
 
 
-COMPONENT_HOPS = ("endpoint", "net", "group", "wire")
+COMPONENT_HOPS = ("endpoint", "net", "wire")
 
 
 def _entity(entity_id: int, page: int, **extra) -> dict:
@@ -70,12 +70,17 @@ def _pdf_info() -> dict:
                     _entity(0, 2, subclass="arrow", page_io="input"),
                     _entity(1, 2, subclass="symbol"),
                     _entity(2, 2, subclass="symbol"),
+                    _entity(3, 2, subclass="symbol", title=["-FRAMED"]),
                 ],
                 "wires": [_entity(index, 2) for index in range(2)],
                 "endpoints": [_entity(index, 2) for index in range(4)],
+                "groups": [_entity(0, 2)],
                 "relations": [
                     *_connect("component:0", "endpoint:0", "wire:0", "endpoint:1", "component:1"),
                     *_connect("component:1", "endpoint:2", "wire:1", "endpoint:3", "component:2"),
+                    # C3 shares only a group with C2 and must never be reached.
+                    {"type": "contains", "source": "group:0", "target": "component:2"},
+                    {"type": "contains", "source": "group:0", "target": "component:3"},
                 ],
                 "transfers": [_transfer(2, 0, 1, 3)],
             }},
@@ -165,6 +170,15 @@ def test_opposite_arrows_never_cross_to_another_page() -> None:
     pages = {page["page_number"] for page in result["result"]["pages"]}
     assert pages == {2}
     assert result["reached_hops"] == 1
+
+
+def test_groups_are_never_crossed_on_an_end_page() -> None:
+    result = _trace("plan/p2/component/1", "downstream", max_hops=10, skip=COMPONENT_HOPS)
+
+    components = {
+        component["id"] for page in result["result"]["pages"] for component in page["components"]
+    }
+    assert components == {"plan/p2/component/0", "plan/p2/component/1", "plan/p2/component/2"}
 
 
 def test_default_skip_counts_wires_along_the_directed_route() -> None:

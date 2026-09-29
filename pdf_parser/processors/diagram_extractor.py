@@ -562,8 +562,10 @@ def extract_vector_elements(
         })
         removed_vector_ids.update(vector_ids)
     remaining_vectors = remove_matched_vector_ids(remaining_vectors, removed_vector_ids)
-    # Before boxes absorb their interior, so a released frame keeps its wires.
-    _release_container_boxes(elements, groups, text_base, content_area)
+    # Container fallback disabled for now: the page-79 case it targeted does not
+    # need it. Re-enable by restoring this call (before boxes absorb their
+    # interior, so a released frame keeps its wires).
+    # _release_container_boxes(elements, groups, text_base, content_area)
     remaining_vectors = assign_remaining_vectors_to_elements(remaining_vectors, elements)
 
     return elements, groups, remaining_vectors
