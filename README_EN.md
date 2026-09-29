@@ -244,7 +244,8 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | Reprocess a cached PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | Delete a cached PDF and unfinished tasks while retaining completed results |
 | `GET` | `/api/v1/documents` | List parsed documents and their reader status |
-| `POST` | `/api/v1/trace` | Run n-hop tracing over the parsed graph, located by global id or filename |
+| `POST` | `/api/v1/trace` | Run n-hop tracing over the parsed graph (optionally upstream/downstream only), located by global id or filename |
+| `GET` | `/api/v1/page-stream?file=…&page=…` | Return a page's input/output arrows and every node's distance to them, for up/downstream decisions in the reader |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | Start reader-data preparation on demand |
 | `POST` | `/api/v1/queries` | Query a completed document |
 
@@ -266,22 +267,27 @@ Every component carries a `subclass`: the type of its only element (such as `sym
 ```json
 {
   "start": {"id": "Plan A/p12/component/4"},
+  "direction": "downstream",
   "max_hops": 2,
   "skip": ["endpoint", "net"],
+  "omit": ["group", "hyperlink"],
   "response_format": "subgraph"
 }
 ```
 
 - `start` is a global id or `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`; `file` may omit `.pdf`.
-- Reaching a kind listed in `skip` (`endpoint`, `net`, `wire`; default `endpoint` and `net`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers are edges between components, so crossing one costs a hop.
-- Groups only frame components and do not connect them, so tracing never passes through a group and cannot start from one.
+- `direction` is `any` (default, no direction), `downstream`, or `upstream`; see below.
+- Reaching a kind listed in `skip` (`endpoint`, `net`, `wire`, `group`; default `endpoint` and `net`) is free and the trace passes through it; reaching any other kind costs one hop and the hop stops there. Transfers and hyperlinks are edges between components, so crossing one costs a hop.
+- `omit` lists node or edge kinds the trace never uses (nodes: `group`, `net`, `wire`, `endpoint`; edges: `hyperlink`, `transfer`). It defaults to `group` and `hyperlink`: groups only frame components without connecting them, and hyperlinks are not wiring. An omitted node kind cannot be the start, and a kind cannot be both skipped and omitted.
 - Each node is reached once, so loops are never expanded twice.
-- `direction` defaults to `any` (no direction). With `downstream` or `upstream`, every hop heads toward the page's arrow components whose `page_io` is `output` or `input`:
+- Upstream/downstream tracing: with `direction` set to `downstream` or `upstream`, every hop heads toward the page's arrow components (`subclass` `arrow`) whose `page_io` is `output` or `input`:
   - a node that can reach such arrows only follows the shortest paths toward them;
   - a node that cannot (including every node of an end page without such arrows) may hop to its neighbours;
   - only arrows of that direction cross to another page through transfers, opposite arrows never do;
   - the result contains only the nodes and edges actually walked.
 - `open_endpoints` lists endpoints with one traced and one untraced side, i.e. where the trace stopped.
+
+`GET /api/v1/page-stream?file=Plan A.pdf&page=12` returns the page's `arrows` (`input` and `output`) and `distances`: every node's edge distance to each arrow, with nodes written as `kind:page-local id`. Distances follow the same rules as up/downstream tracing (groups are not crossed, arrows end paths). The reader's Info Trace fetches it once per page to decide which exits head the chosen way.
 
 ## Import an Existing Parsing Result
 

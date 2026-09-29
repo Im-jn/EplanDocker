@@ -243,7 +243,8 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 | `POST` | `/api/v1/cached-pdfs/{cache_id}/reprocess` | 重新处理缓存 PDF |
 | `DELETE` | `/api/v1/cached-pdfs/{cache_id}` | 删除缓存 PDF 和未完成任务，保留已完成任务及结果 |
 | `GET` | `/api/v1/documents` | 列出已解析文档及其 reader 状态 |
-| `POST` | `/api/v1/trace` | 基于 parsed graph 执行 n-hop tracing，按全局 id 或文件名定位 |
+| `POST` | `/api/v1/trace` | 基于 parsed graph 执行 n-hop tracing（可限定上游/下游），按全局 id 或文件名定位 |
+| `GET` | `/api/v1/page-stream?file=…&page=…` | 返回某页 input/output arrow 及页内各节点到它们的距离，供前端判断上下游 |
 | `POST` | `/api/v1/documents/{document_id}/prepare` | 按需启动 reader-data 预处理 |
 | `POST` | `/api/v1/queries` | 查询已完成文档 |
 
@@ -265,22 +266,27 @@ curl.exe http://localhost:8000/api/v1/parsing-batches/BATCH_ID
 ```json
 {
   "start": {"id": "Plan A/p12/component/4"},
+  "direction": "downstream",
   "max_hops": 2,
   "skip": ["endpoint", "net"],
+  "omit": ["group", "hyperlink"],
   "response_format": "subgraph"
 }
 ```
 
 - `start` 可以是全局 id，也可以是 `{"file": "Plan A.pdf", "page": 12, "kind": "component", "id": 4}`；`file` 带不带 `.pdf` 均可。
-- 到达 `skip` 中的类型（可选 `endpoint`、`net`、`wire`，默认 `endpoint`、`net`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 是 component 之间的边，穿过它计一跳。
-- group 只是把几个 component 框在一起，并不代表电气连接，所以 tracing 永远不经过 group，也不能从 group 出发。
+- `direction` 可选 `any`（默认，不限方向）、`downstream`（下游）、`upstream`（上游），规则见下文。
+- 到达 `skip` 中的类型（可选 `endpoint`、`net`、`wire`、`group`，默认 `endpoint`、`net`）不计跳数，会继续穿过；到达其他类型计一跳并在该处停止。transfer 和 hyperlink 是 component 之间的边，穿过它们计一跳。
+- `omit` 列出 tracing 完全不走的节点或边类型（节点可选 `group`、`net`、`wire`、`endpoint`，边可选 `hyperlink`、`transfer`）。默认 `group`、`hyperlink`：group 只是把几个 component 框在一起、不代表电气连接，hyperlink 也不是接线。omit 掉的节点类型不能作为起点；同一类型不能同时出现在 `skip` 和 `omit` 中。
 - 每个节点只会被到达一次，因此回环不会重复展开。
-- `direction` 默认为 `any`（不限方向）。设为 `downstream` 或 `upstream` 时，每一跳都朝本页 `page_io` 为 `output` 或 `input` 的 arrow component 前进：
+- 上下游 tracing：`direction` 设为 `downstream` 或 `upstream` 时，每一跳都朝本页 `page_io` 为 `output` 或 `input` 的 arrow component（`subclass` 为 `arrow`）前进：
   - 当前节点能通往这些 arrow 时，只沿通往它们的最短路径走；
   - 通不到时（包括本页没有该方向 arrow 的末端页），允许跳到相邻节点；
   - 只有该方向的 arrow 才会沿 transfer 跨页，反方向 arrow 不跨页；
   - 结果只包含实际走过的节点和边。
 - 返回中的 `open_endpoints` 是一端已追踪、另一端尚未追踪的 endpoint，即 tracing 停下的位置。
+
+`GET /api/v1/page-stream?file=Plan A.pdf&page=12` 返回这一页的 `arrows`（`input` / `output` 两组）以及 `distances`：页内每个节点到每个 arrow 的边数距离，节点用 `kind:页内id` 表示。距离的计算规则与上下游 tracing 相同（不经过 group，arrow 只作终点）。前端 Info Trace 用它判断哪些出口朝指定方向，每页只请求一次。
 
 ## 导入已有解析结果
 

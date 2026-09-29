@@ -172,6 +172,18 @@ def test_opposite_arrows_never_cross_to_another_page() -> None:
     assert result["reached_hops"] == 1
 
 
+def test_omitted_transfers_stop_at_the_exit_arrow() -> None:
+    result = _trace(
+        "plan/p1/component/1", "downstream",
+        max_hops=10, skip=COMPONENT_HOPS, omit=("group", "hyperlink", "transfer"),
+    )
+
+    assert {page["page_number"] for page in result["result"]["pages"]} == {1}
+    assert "plan/p1/component/3" in {
+        component["id"] for page in result["result"]["pages"] for component in page["components"]
+    }
+
+
 def test_groups_are_never_crossed_on_an_end_page() -> None:
     result = _trace("plan/p2/component/1", "downstream", max_hops=10, skip=COMPONENT_HOPS)
 

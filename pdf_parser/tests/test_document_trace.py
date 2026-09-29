@@ -54,7 +54,10 @@ def _pdf_info(extra_relations: list[dict] | None = None) -> dict:
                     {"type": "contains", "source": "group:5", "target": "component:6"},
                     *(extra_relations or []),
                 ],
-                "hyperlinks": [],
+                # Followed only when hyperlinks are not omitted.
+                "hyperlinks": [{
+                    "source_page": 1, "source_component": 1, "target_page": 2, "target_component": 9,
+                }],
                 "transfers": [{
                     "source_page": 1,
                     "source_component": 4,
@@ -90,7 +93,8 @@ def test_default_skip_counts_only_components_and_wires() -> None:
     hops = [hop["pages"] for hop in result["hops"]]
     assert _ids(hops[0], "components") == ["plan/p1/component/1"]
     assert _ids(hops[0], "endpoints") == ["plan/p1/endpoint/10"]
-    assert all("groups" not in page for pages in hops for page in pages)
+    assert result["omit"] == ["group", "hyperlink"]
+    assert all(page["groups"] == [] and page["hyperlinks"] == [] for pages in hops for page in pages)
     assert _ids(hops[1], "components") == []
     assert _ids(hops[1], "wires") == ["plan/p1/wire/2"]
     assert _ids(hops[1], "nets") == ["plan/p1/net/7"]
@@ -197,13 +201,45 @@ def test_start_accepts_filename_page_and_local_id() -> None:
         assert _ids(result["result"]["pages"], "components") == []
 
 
+def test_groups_can_be_traversed_when_not_omitted() -> None:
+    with TemporaryDirectory() as directory:
+        result = _trace(
+            directory,
+            max_hops=1,
+            skip=("endpoint", "net", "group"),
+            omit=("hyperlink",),
+            response_format="hops",
+        )
+
+    assert _ids(result["hops"][1]["pages"], "components") == ["plan/p1/component/6"]
+    assert _ids(result["hops"][0]["pages"], "groups") == ["plan/p1/group/5"]
+
+
+def test_hyperlinks_are_followed_when_not_omitted() -> None:
+    with TemporaryDirectory() as directory:
+        result = _trace(directory, max_hops=1, omit=("group",), response_format="hops")
+
+    assert _ids(result["hops"][1]["pages"], "components") == ["plan/p2/component/9"]
+    assert _ids(result["hops"][1]["pages"], "hyperlinks") == ["plan/p1/hyperlink/0"]
+
+
+def test_omitting_transfers_keeps_the_trace_on_its_page() -> None:
+    with TemporaryDirectory() as directory:
+        result = _trace(directory, max_hops=10, omit=("group", "hyperlink", "transfer"))
+
+    assert {page["page_number"] for page in result["result"]["pages"]} == {1}
+    assert _ids(result["result"]["pages"], "transfers") == []
+
+
 def test_rejects_missing_start_document_and_bad_skip() -> None:
     with TemporaryDirectory() as directory:
         for kwargs, error in (
             ({"start_id": "plan/p1/component/999"}, TraceStartNotFoundError),
             ({"skip": ("transfer",)}, ValueError),
-            ({"skip": ("group",)}, ValueError),
+            ({"skip": ("group",)}, ValueError),  # groups are omitted by default
             ({"start_id": "plan/p1/group/5"}, ValueError),
+            ({"omit": ("component",)}, ValueError),
+            ({"skip": ("endpoint", "wire"), "omit": ("wire",)}, ValueError),
         ):
             try:
                 _trace(directory, max_hops=1, **kwargs)

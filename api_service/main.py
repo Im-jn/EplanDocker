@@ -39,6 +39,7 @@ from eplan_runtime import (
 )
 from api_service.publisher import request_publish
 from pdf_parser.document_trace import (
+    DEFAULT_OMIT,
     DEFAULT_SKIP,
     TraceDocumentNotFoundError,
     TraceStartNotFoundError,
@@ -57,14 +58,17 @@ class TraceStart(BaseModel):
     id: int | str
     file: str | None = None
     page: int | None = Field(default=None, ge=1)
-    kind: Literal["component", "wire", "endpoint", "net"] | None = None
+    kind: Literal["component", "wire", "endpoint", "net", "group"] | None = None
 
 
 class TraceRequest(BaseModel):
     start: TraceStart
     max_hops: int = Field(default=1, ge=0, le=50)
-    skip: list[Literal["endpoint", "net", "wire"]] = Field(
+    skip: list[Literal["endpoint", "net", "wire", "group"]] = Field(
         default_factory=lambda: list(DEFAULT_SKIP)
+    )
+    omit: list[Literal["group", "net", "wire", "endpoint", "hyperlink", "transfer"]] = Field(
+        default_factory=lambda: list(DEFAULT_OMIT)
     )
     direction: Literal["any", "upstream", "downstream"] = "any"
     response_format: Literal["subgraph", "hops"] = "subgraph"
@@ -761,6 +765,7 @@ def trace(request: TraceRequest) -> dict[str, Any]:
             start_local_id=start.id if local_start else None,
             max_hops=request.max_hops,
             skip=request.skip,
+            omit=request.omit,
             direction=request.direction,
             response_format=request.response_format,
         )

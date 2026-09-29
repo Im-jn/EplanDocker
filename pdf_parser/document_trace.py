@@ -1,12 +1,15 @@
 """Document-level n-hop tracing over the parsed graph database.
 
 A hop is counted when the trace arrives at a node whose kind is not skipped.
-Arriving at a skipped kind (``endpoint``/``net``/``wire``) is free, so
+Arriving at a skipped kind (``endpoint``/``net``/``wire``/``group``) is free, so
 the trace keeps expanding through it until it reaches counted nodes, and the hop
-ends there. Transfers are edges between components and therefore cost one hop.
-Every node is reached at most once, which keeps loops from being re-expanded.
-Groups only frame components and do not connect them, so they are never
-traversed: a component never reaches another through a shared group.
+ends there. Transfers and hyperlinks are edges between components and therefore
+cost one hop. Every node is reached at most once, which keeps loops from being
+re-expanded.
+
+``omit`` lists node or edge kinds the trace never uses at all. By default groups
+(which only frame components and do not connect them) and hyperlinks are
+omitted, so a component never reaches another through a shared group or link.
 
 With ``direction`` set to ``upstream`` or ``downstream``, every hop also has to
 head toward the page's input or output arrows; see :class:`_DirectedTracer`.
@@ -29,10 +32,15 @@ from pdf_parser.parsed_json import global_id, id_kind, id_local_part
 
 ResponseFormat = Literal["subgraph", "hops"]
 TraceDirection = Literal["any", "upstream", "downstream"]
-SKIPPABLE_KINDS = frozenset({"endpoint", "net", "wire"})
+SKIPPABLE_KINDS = frozenset({"endpoint", "net", "wire", "group"})
+OMITTABLE_NODE_KINDS = frozenset({"group", "net", "wire", "endpoint"})
+OMITTABLE_EDGE_KINDS = frozenset({"hyperlink", "transfer"})
+OMITTABLE_KINDS = OMITTABLE_NODE_KINDS | OMITTABLE_EDGE_KINDS
 DEFAULT_SKIP = ("endpoint", "net")
-NODE_KINDS = ("component", "wire", "endpoint", "net")
-TRACE_EDGE_KINDS = ("connection", "contains", "transfer")
+DEFAULT_OMIT = ("group", "hyperlink")
+NODE_KINDS = ("component", "wire", "endpoint", "net", "group")
+TRACE_EDGE_KINDS = ("connection", "contains", "transfer", "hyperlink")
+CROSS_PAGE_EDGE_KINDS = ("transfer", "hyperlink")
 _QUERY_CHUNK = 400
 
 
@@ -54,6 +62,7 @@ def trace_document(
     start_local_id: int | str | None = None,
     max_hops: int,
     skip: Iterable[str] = DEFAULT_SKIP,
+    omit: Iterable[str] = DEFAULT_OMIT,
     direction: TraceDirection = "any",
     response_format: ResponseFormat = "subgraph",
 ) -> dict[str, Any]:
@@ -62,22 +71,28 @@ def trace_document(
 
     Callers only need the filename they submitted, never an internal document id.
     ``direction`` other than ``any`` keeps every hop heading up- or downstream.
+    ``omit`` names node or edge kinds the trace never passes through or along.
     """
     skipped = frozenset(skip)
+    omitted = frozenset(omit)
     if direction not in {"any", *ARROW_IO}:
         raise ValueError("direction must be any, upstream or downstream")
     if max_hops < 0:
         raise ValueError("max_hops must be non-negative")
     if not skipped <= SKIPPABLE_KINDS:
         raise ValueError(f"skip may only contain {sorted(SKIPPABLE_KINDS)}")
+    if not omitted <= OMITTABLE_KINDS:
+        raise ValueError(f"omit may only contain {sorted(OMITTABLE_KINDS)}")
+    if skipped & omitted:
+        raise ValueError(f"{sorted(skipped & omitted)} cannot be both skipped and omitted")
     if response_format not in {"subgraph", "hops"}:
         raise ValueError("response_format must be subgraph or hops")
     if start_id is None:
         if file is None or start_page is None or start_kind is None or start_local_id is None:
             raise ValueError("start needs a global id, or file, page, kind and id")
         start_id = global_id(file, start_page, start_kind, start_local_id)
-    if id_kind(start_id) == "group":
-        raise ValueError("groups are not traced; start from a component or wire")
+    if id_kind(start_id) in omitted:
+        raise ValueError(f"{id_kind(start_id)} is omitted, so the trace cannot start from it")
 
     with closing(connect_parsed_graph(database_path)) as connection:
         row = connection.execute("SELECT filename FROM nodes WHERE id = ?", (start_id,)).fetchone()
@@ -89,13 +104,13 @@ def trace_document(
             raise TraceStartNotFoundError(f"{start_id} was not found")
         filename = str(row[0])
 
-        tracer = _GraphTracer(connection, skipped)
+        tracer = _GraphTracer(connection, skipped, omitted)
         if direction == "any":
             dist = tracer.expand(start_id, max_hops)
             selected = tracer.select_output(start_id, dist)
             edge_records = tracer.induced_edges(selected, dist)
         else:
-            directed = _DirectedTracer(connection, skipped, ARROW_IO[direction])
+            directed = _DirectedTracer(connection, skipped, omitted, ARROW_IO[direction])
             dist, selected, edge_ids = directed.expand(start_id, max_hops)
             edge_records = [
                 (edge, max(dist[edge["source"]], dist[edge["target"]]))
@@ -113,6 +128,7 @@ def trace_document(
         },
         "max_hops": max_hops,
         "skip": sorted(skipped),
+        "omit": sorted(omitted),
         "direction": direction,
         "response_format": response_format,
         "reached_hops": max(dist[node] for node in selected),
@@ -141,9 +157,16 @@ def trace_document(
 
 
 class _GraphTracer:
-    def __init__(self, connection: sqlite3.Connection, skipped: frozenset[str]) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        skipped: frozenset[str],
+        omitted: frozenset[str],
+    ) -> None:
         self.connection = connection
         self.skipped = skipped
+        self.omitted = omitted
+        self.edge_kinds = [kind for kind in TRACE_EDGE_KINDS if kind not in omitted]
         self.adjacency: dict[str, list[tuple[str, str]]] = {}
         self.edges: dict[str, dict[str, Any]] = {}
 
@@ -258,8 +281,8 @@ class _GraphTracer:
     ) -> list[tuple[dict[str, Any], int]]:
         """Return ``(edge record, hop)`` for trace edges between selected nodes.
 
-        Parallel transfers between the same source and target component collapse
-        to the one with the smallest id; each direction is kept.
+        Parallel transfers or hyperlinks between the same source and target
+        component collapse to the one with the smallest id; each direction is kept.
         """
         edge_ids = {
             edge_id
@@ -270,7 +293,11 @@ class _GraphTracer:
         edges: dict[Any, dict[str, Any]] = {}
         for edge_id in _sorted_ids(edge_ids):
             edge = self.edges[edge_id]
-            key = (edge["source"], edge["target"]) if edge["type"] == "transfer" else edge_id
+            key = (
+                (edge["type"], edge["source"], edge["target"])
+                if edge["type"] in CROSS_PAGE_EDGE_KINDS
+                else edge_id
+            )
             edges.setdefault(key, edge)
         return [
             (edge, max(dist[edge["source"]], dist[edge["target"]]))
@@ -287,12 +314,12 @@ class _GraphTracer:
             placeholders = _placeholders(chunk)
             rows = self.connection.execute(
                 "SELECT id, kind, source_id, target_id, source_page, target_page, properties "
-                "FROM edges WHERE kind IN ('connection', 'contains', 'transfer') "
+                f"FROM edges WHERE kind IN ({_placeholders(self.edge_kinds)}) "
                 f"AND (source_id IN ({placeholders}) OR target_id IN ({placeholders}))",
-                [*chunk, *chunk],
+                [*self.edge_kinds, *chunk, *chunk],
             )
             for edge_id, kind, source, target, source_page, target_page, properties in rows:
-                if id_kind(source) == "group" or id_kind(target) == "group":
+                if id_kind(source) in self.omitted or id_kind(target) in self.omitted:
                     continue
                 self.edges.setdefault(edge_id, {
                     "id": edge_id,
@@ -317,17 +344,20 @@ class _DirectedTracer:
     closer (see :class:`PageGraph`). From a node that reaches none of them,
     including every node of a page without such arrows, a hop may go to any
     in-page neighbour. Only those target arrows cross to another page, through
-    their transfers; arrows of the opposite direction never do.
+    their transfers (and hyperlinks when not omitted); arrows of the opposite
+    direction never do. Omitted node kinds are never entered.
     """
 
     def __init__(
         self,
         connection: sqlite3.Connection,
         skipped: frozenset[str],
+        omitted: frozenset[str],
         target_io: str,
     ) -> None:
         self.connection = connection
         self.skipped = skipped
+        self.omitted = omitted
         self.target_io = target_io
         self.page_of: dict[str, PageGraph] = {}
         self.edges: dict[str, dict[str, Any]] = {}
@@ -399,7 +429,7 @@ class _DirectedTracer:
         while queue:
             current = queue.popleft()
             for edge_id, neighbor in page.adjacency[current]:
-                if neighbor == start or id_kind(neighbor) == "group" or not allowed(current, neighbor):
+                if neighbor == start or id_kind(neighbor) in self.omitted or not allowed(current, neighbor):
                     continue
                 if neighbor in predecessors:
                     predecessors[neighbor].append((edge_id, current))
@@ -422,12 +452,16 @@ class _DirectedTracer:
         return found, via_nodes, via_edges
 
     def _cross_page(self, arrow: str, seen: frozenset[str]) -> tuple[set[str], set[str], set[str]]:
-        """Follow a target arrow's transfers, one edge per partner arrow."""
+        """Follow a target arrow's cross-page links, one edge per partner component."""
+        kinds = [kind for kind in CROSS_PAGE_EDGE_KINDS if kind not in self.omitted]
+        if not kinds:
+            return set(), set(), set()
         partners: dict[str, str] = {}
         for edge_id, kind, source, target, source_page, target_page, properties in self.connection.execute(
             "SELECT id, kind, source_id, target_id, source_page, target_page, properties "
-            "FROM edges WHERE kind = 'transfer' AND (source_id = ? OR target_id = ?) ORDER BY id",
-            (arrow, arrow),
+            f"FROM edges WHERE kind IN ({_placeholders(kinds)}) "
+            "AND (source_id = ? OR target_id = ?) ORDER BY id",
+            (*kinds, arrow, arrow),
         ):
             self.edges.setdefault(edge_id, {
                 "id": edge_id,
@@ -467,13 +501,14 @@ def _project_pages(
             **{f"{kind}s": [] for kind in NODE_KINDS},
             "relations": [],
             "transfers": [],
+            "hyperlinks": [],
         })
 
     for node in sorted(nodes, key=lambda record: _id_sort_key(record["id"])):
         page_entry(node["page"])[f"{node['type']}s"].append(node)
     for edge, _ in sorted(edges, key=lambda item: _id_sort_key(item[0]["id"])):
-        if edge["type"] == "transfer":
-            page_entry(edge["source_page"])["transfers"].append({
+        if edge["type"] in CROSS_PAGE_EDGE_KINDS:
+            page_entry(edge["source_page"])[f"{edge['type']}s"].append({
                 "id": edge["id"],
                 "source_page": edge["source_page"],
                 "source_component": edge["source"],
